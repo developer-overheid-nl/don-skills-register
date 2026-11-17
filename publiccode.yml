@@ -1,0 +1,53 @@
+publiccodeYmlVersion: "0.7.0"
+
+name: API van het Skills register
+url: "https://github.com/developer-overheid-nl/don-skills-register"
+landingURL: "https://skills.developer.overheid.nl"
+softwareType: standalone/web
+platforms:
+  - web
+
+categories:
+  - it-management
+developmentStatus: concept
+
+description:
+  nl:
+    shortDescription: >-
+      API van het Skills register (skills.developer.overheid.nl)
+    longDescription: |
+      De API van het Skills-register maakt AI skills voor de overheid beter
+      vindbaar en herbruikbaar. Het register harvest skills (SKILL.md) uit
+      plugin-marketplaces en losse repositories en ontsluit de metadata en
+      inhoud via een API, zodat ontwikkelaars en organisaties kunnen zien
+      welke skills er zijn, waar ze vandaan komen en wie ze beheert.
+    features:
+      - Doorzoekbare catalogus van AI skills
+      - Harvesten van plugin-marketplaces en losse skill-repositories
+
+legal:
+  license: EUPL-1.2
+  mainCopyrightOwner: Geonovum
+
+organisation:
+  name: Geonovum
+  uri: https://www.geonovum.nl/
+
+intendedAudience:
+  countries:
+    - NL
+  scope:
+    - government
+
+localisation:
+  availableLanguages:
+    - nl
+  localisationReady: false
+
+maintenance:
+  type: internal
+
+  contacts:
+    - name: developer.overheid.nl
+      email: developer.overheid@geonovum.nl
+      affiliation: Geonovum

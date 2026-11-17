@@ -1,0 +1,21 @@
+name: Deploy to Test
+
+on:
+  workflow_dispatch:
+  push:
+    branches-ignore:
+      - main
+      - "changeset-release/**"
+      - "changesets-ghcommit-temp/**"
+
+jobs:
+  deploy:
+    uses: developer-overheid-nl/.github/.github/workflows/deploy.yml@v1
+    permissions:
+      contents: read
+      packages: write
+    with:
+      environment: test
+      infra-repo: ${{ vars.INFRA_REPO }}
+      kustomize-path: ${{ vars.KUSTOMIZE_PATH }}
+    secrets: inherit

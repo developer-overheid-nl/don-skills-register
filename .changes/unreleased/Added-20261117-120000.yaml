@@ -1,0 +1,3 @@
+kind: Added
+body: Initial Skills register API that harvests AI skills (`SKILL.md`) from plugin marketplaces and standalone GitHub repositories, with endpoints for skills, plugins, sources and organisations.
+time: 2026-11-17T12:00:00+01:00
