@@ -1,0 +1,12 @@
+name: JSON CI
+
+on: pull_request
+
+jobs:
+  lint-and-validate:
+    uses: developer-overheid-nl/.github/.github/workflows/json-ci.yml@v1
+    permissions:
+      contents: read
+      statuses: write
+      issues: write
+      pull-requests: write

@@ -1,0 +1,19 @@
+name: Deploy to Production
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    uses: developer-overheid-nl/.github/.github/workflows/deploy.yml@v1
+    permissions:
+      contents: read
+      packages: write
+    with:
+      environment: prod
+      infra-repo: ${{ vars.INFRA_REPO }}
+      kustomize-path: ${{ vars.KUSTOMIZE_PATH }}
+    secrets: inherit
