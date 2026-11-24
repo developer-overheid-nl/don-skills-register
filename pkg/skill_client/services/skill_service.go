@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -34,10 +35,15 @@ type SkillService struct {
 	labeler   OrganisationLabeler
 	indexer   func(ctx context.Context, skill models.Skill) error
 
-	// harvestMu voorkomt dat de dagelijkse job en een handmatige registratie
-	// tegelijk dezelfde bron harvesten.
+	// background voert de eerste harvest van een nieuwe bron uit.
+	background func(func())
+
+	// harvestMu voorkomt dat de dagelijkse job en een nieuwe registratie
+	// tegelijk harvesten.
 	harvestMu sync.Mutex
 }
+
+const firstHarvestTimeout = 10 * time.Minute
 
 func NewSkillService(repo repositories.SkillsRepository, h SourceHarvester) *SkillService {
 	return &SkillService{
@@ -46,8 +52,15 @@ func NewSkillService(repo repositories.SkillsRepository, h SourceHarvester) *Ski
 		labeler: func(ctx context.Context, uri string) (string, error) {
 			return commonhttpclient.FetchOrganisationLabel(ctx, uri)
 		},
-		indexer: publishSkillToTypesense,
+		indexer:    publishSkillToTypesense,
+		background: func(f func()) { go f() },
 	}
+}
+
+// SetBackgroundRunner bepaalt hoe de eerste harvest van een nieuwe bron
+// draait; tests draaien hem synchroon.
+func (s *SkillService) SetBackgroundRunner(run func(func())) {
+	s.background = run
 }
 
 // SetOrganisationLabeler vervangt de TOOI-lookup, bijvoorbeeld in tests.
@@ -131,23 +144,6 @@ func filterGroup(key, label, description string, counts []models.FilterCount, se
 	return models.FilterGroup{Key: key, Label: label, Description: description, Type: "multi-select", Options: options}
 }
 
-// ---- Plugins ----
-
-func (s *SkillService) ListPlugins(ctx context.Context, p *models.ListParams) ([]models.Plugin, models.Pagination, error) {
-	return s.repo.ListPlugins(ctx, p.Page, p.PerPage)
-}
-
-func (s *SkillService) RetrievePlugin(ctx context.Context, id string) (*models.Plugin, error) {
-	plugin, err := s.repo.GetPluginByID(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	if plugin == nil {
-		return nil, problem.NewNotFound("Resource does not exist")
-	}
-	return plugin, nil
-}
-
 // ---- Sources ----
 
 func (s *SkillService) ListSources(ctx context.Context, p *models.ListParams) ([]models.Source, models.Pagination, error) {
@@ -192,8 +188,15 @@ func (s *SkillService) HarvestSource(ctx context.Context, source *models.Source)
 	source.LastHarvestedAt = &now
 
 	result, err := s.harvester.Harvest(ctx, *source)
+	var occurrences []models.SkillOccurrence
 	if err == nil {
-		err = s.repo.ReplaceSourceContent(ctx, source.Id, result.Plugins, result.Skills)
+		// Vóór het ontdubbelen: ook skills die bij een andere bron horen,
+		// komen in deze bron voor.
+		occurrences = occurrencesOf(source.Id, result.Skills)
+		err = s.dropOwnedElsewhere(ctx, source, result)
+	}
+	if err == nil {
+		err = s.repo.ReplaceSourceContent(ctx, source.Id, result.Plugins, result.Skills, occurrences)
 	}
 	if err != nil {
 		log.Printf("[harvest] %s mislukt: %v", source.Url, err)
@@ -222,69 +225,156 @@ func (s *SkillService) HarvestSource(ctx context.Context, source *models.Source)
 	return len(result.Skills)
 }
 
-// SyncSources maakt de bronnen in de database gelijk aan de configuratie
-// (sources.json): nieuwe bronnen worden toegevoegd, type en organisatie van
-// bestaande bronnen bijgewerkt, en bronnen die niet meer in de configuratie
-// staan worden met hun plugins en skills verwijderd. Harvesten gebeurt
-// daarna door de harvest-job.
-func (s *SkillService) SyncSources(ctx context.Context, configs []models.SourceConfig) error {
-	wanted := make(map[string]models.SourceConfig, len(configs))
-	for _, cfg := range configs {
-		if cfg.Type != models.SourceTypeMarketplace && cfg.Type != models.SourceTypeRepository {
-			return fmt.Errorf("bron %q: onbekend type %q", cfg.Url, cfg.Type)
-		}
-		repo, err := harvester.ParseGitHubURL(cfg.Url)
-		if err != nil {
-			return fmt.Errorf("bron %q: %w", cfg.Url, err)
-		}
-		if _, dup := wanted[repo.URL()]; dup {
-			return fmt.Errorf("bron %q staat dubbel in de configuratie", repo.URL())
-		}
-		wanted[repo.URL()] = cfg
+// dropOwnedElsewhere zorgt dat elke plugin en skill maar één keer in het
+// register staat. Ids zijn gebaseerd op repository en pad, dus dezelfde skill
+// via twee bronnen (bijvoorbeeld een plugin uit een marketplace die ook los is
+// geregistreerd) heeft hetzelfde id. Hij hoort dan bij de meest specifieke bron
+// (skill boven plugin boven marketplace); bij gelijk type bij de oudste. Items
+// van een andere bron die voorgaat, worden uit het resultaat gehaald; neemt
+// deze bron het over, dan verhuist het item met behoud van createdAt.
+func (s *SkillService) dropOwnedElsewhere(ctx context.Context, source *models.Source, result *harvester.Result) error {
+	pluginIDs := make([]string, len(result.Plugins))
+	for i, p := range result.Plugins {
+		pluginIDs[i] = p.Id
 	}
-
-	existing, err := s.repo.AllSources(ctx)
+	skillIDs := make([]string, len(result.Skills))
+	for i, sk := range result.Skills {
+		skillIDs[i] = sk.Id
+	}
+	pluginOwners, err := s.repo.PluginOwners(ctx, pluginIDs)
 	if err != nil {
 		return err
 	}
-	byURL := make(map[string]*models.Source, len(existing))
-	for i := range existing {
-		src := &existing[i]
-		if _, ok := wanted[src.Url]; !ok {
-			if err := s.repo.DeleteSource(ctx, src.Id); err != nil {
-				return err
-			}
-			log.Printf("[sources] bron %s verwijderd", src.Url)
-			continue
-		}
-		byURL[src.Url] = src
+	skillOwners, err := s.repo.SkillOwners(ctx, skillIDs)
+	if err != nil {
+		return err
 	}
 
-	for url, cfg := range wanted {
-		source, found := byURL[url]
-		if !found {
-			repo, _ := harvester.ParseGitHubURL(url)
-			source = &models.Source{Id: uuid.NewString(), Url: url, Name: repo.String(), CreatedAt: time.Now().UTC()}
+	sources := map[string]*models.Source{}
+	ownedElsewhere := func(ownerID string) (*models.Source, error) {
+		if ownerID == "" || ownerID == source.Id {
+			return nil, nil
 		}
-		source.Type = cfg.Type
-		source.OrganisationID = nil
-		if uri := strings.TrimSpace(cfg.OrganisationUri); uri != "" {
-			org, err := s.ensureOrganisation(ctx, uri)
-			if err != nil {
-				log.Printf("[sources] organisatie %s voor %s niet gevonden: %v", uri, url, err)
-			} else {
-				source.OrganisationID = &org.Uri
+		other, ok := sources[ownerID]
+		if !ok {
+			var err error
+			if other, err = s.repo.GetSourceByID(ctx, ownerID); err != nil {
+				return nil, err
 			}
+			sources[ownerID] = other
 		}
-		source.Organisation = nil
-		if err := s.repo.SaveSource(ctx, source); err != nil {
+		if other == nil || outranks(source, other) {
+			return nil, nil
+		}
+		return other, nil
+	}
+
+	plugins := result.Plugins[:0]
+	for _, p := range result.Plugins {
+		other, err := ownedElsewhere(pluginOwners[p.Id])
+		if err != nil {
 			return err
 		}
-		if !found {
-			log.Printf("[sources] bron %s toegevoegd", url)
+		if other != nil {
+			log.Printf("[harvest] %s: plugin %s staat al in bron %s", source.Url, p.Name, other.Url)
+			continue
 		}
+		plugins = append(plugins, p)
 	}
+	skills := result.Skills[:0]
+	for _, sk := range result.Skills {
+		other, err := ownedElsewhere(skillOwners[sk.Id])
+		if err != nil {
+			return err
+		}
+		if other != nil {
+			log.Printf("[harvest] %s: skill %s staat al in bron %s", source.Url, sk.Path, other.Url)
+			continue
+		}
+		skills = append(skills, sk)
+	}
+	result.Plugins, result.Skills = plugins, skills
 	return nil
+}
+
+func occurrencesOf(sourceID string, skills []models.Skill) []models.SkillOccurrence {
+	out := make([]models.SkillOccurrence, 0, len(skills))
+	seen := make(map[string]bool, len(skills))
+	for _, sk := range skills {
+		if seen[sk.Id] {
+			continue
+		}
+		seen[sk.Id] = true
+		out = append(out, models.SkillOccurrence{SkillID: sk.Id, SourceID: sourceID, PluginID: sk.PluginID})
+	}
+	return out
+}
+
+var sourcePriority = map[models.SourceType]int{
+	models.SourceTypeMarketplace: 1,
+	models.SourceTypePlugin:      2,
+	models.SourceTypeSkill:       3,
+}
+
+// outranks geeft aan of bron a een item mag hebben dat nu bij b hoort.
+func outranks(a, b *models.Source) bool {
+	if pa, pb := sourcePriority[a.Type], sourcePriority[b.Type]; pa != pb {
+		return pa > pb
+	}
+	if !a.CreatedAt.Equal(b.CreatedAt) {
+		return a.CreatedAt.Before(b.CreatedAt)
+	}
+	return a.Id < b.Id
+}
+
+// CreateSource registreert een bron, gekoppeld aan een organisatie. De
+// organisatie wordt via TOOI aangemaakt als hij nog niet bestaat. De bron wordt
+// direct op de achtergrond geharvest en daarna dagelijks door de harvest-job.
+func (s *SkillService) CreateSource(ctx context.Context, in models.SourceInput) (*models.Source, error) {
+	loc, err := harvester.ParseGitHubLocation(in.Url)
+	if err != nil {
+		return nil, problem.NewBadRequest("Invalid input", bodyError("url", "invalid", err.Error()))
+	}
+	url := loc.URL()
+	existing, err := s.repo.FindSourceByURL(ctx, url)
+	if err != nil {
+		return nil, err
+	}
+	if existing != nil {
+		return nil, problem.New(http.StatusConflict, "Source already exists",
+			bodyError("url", "conflict", "source already exists"))
+	}
+	org, err := s.ensureOrganisation(ctx, strings.TrimSpace(in.OrganisationUri))
+	if err != nil {
+		return nil, err
+	}
+
+	name := loc.Repo.String()
+	if loc.Path != "" {
+		name += "/" + loc.Path
+	}
+	source := &models.Source{
+		Id:             uuid.NewString(),
+		Type:           in.Type,
+		Url:            url,
+		Name:           name,
+		OrganisationID: &org.Uri,
+		CreatedAt:      time.Now().UTC(),
+	}
+	if err := s.repo.SaveSource(ctx, source); err != nil {
+		return nil, err
+	}
+	log.Printf("[sources] bron %s (%s) toegevoegd voor %s", url, in.Type, org.Uri)
+
+	toHarvest := *source
+	s.background(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), firstHarvestTimeout)
+		defer cancel()
+		s.HarvestSource(ctx, &toHarvest)
+	})
+
+	source.Organisation = org
+	return source, nil
 }
 
 func (s *SkillService) index(plugins []models.Plugin, skills []models.Skill) {
@@ -367,15 +457,57 @@ func toSkillSummary(s *models.Skill) models.SkillSummary {
 		CreatedAt:     s.CreatedAt,
 		LastCrawledAt: s.LastCrawled,
 	}
-	if s.Plugin != nil {
-		out.Plugin = &models.PluginRef{Id: s.Plugin.Id, Name: s.Plugin.Name, Version: s.Plugin.Version}
+	plugin := s.Plugin
+	if plugin == nil {
+		// Een los geregistreerde skill heeft zelf geen plugin; toon dan de
+		// plugin waarin hij via een andere bron voorkomt.
+		plugin = occurrencePlugin(s.Occurrences)
 	}
+	if plugin != nil {
+		out.Plugin = &models.PluginRef{Id: plugin.Id, Name: plugin.Name, Version: plugin.Version}
+	}
+	out.Marketplaces = marketplacesOf(s.Occurrences)
 	if s.Source != nil {
-		out.Source = &models.SourceRef{Id: s.Source.Id, Type: s.Source.Type, Url: s.Source.Url}
+		out.Source = &models.SourceRef{Id: s.Source.Id, Type: s.Source.Type, Name: s.Source.Name, Url: s.Source.Url}
 		if org := s.Source.Organisation; org != nil {
 			out.Organisation = &models.OrganisationSummary{Uri: org.Uri, Label: org.Label}
 		}
 	}
+	return out
+}
+
+// occurrencePlugin kiest de plugin uit de bron met de hoogste prioriteit.
+func occurrencePlugin(occ []models.SkillOccurrence) *models.Plugin {
+	var best *models.SkillOccurrence
+	for i := range occ {
+		o := &occ[i]
+		if o.Plugin == nil || o.Source == nil {
+			continue
+		}
+		if best == nil || outranks(o.Source, best.Source) {
+			best = o
+		}
+	}
+	if best == nil {
+		return nil
+	}
+	return best.Plugin
+}
+
+// marketplacesOf geeft de marketplaces waarin de skill voorkomt, op naam.
+func marketplacesOf(occ []models.SkillOccurrence) []models.MarketplaceRef {
+	var out []models.MarketplaceRef
+	for _, o := range occ {
+		if o.Source != nil && o.Source.Type == models.SourceTypeMarketplace {
+			out = append(out, models.MarketplaceRef{Id: o.Source.Id, Name: o.Source.Name, Url: o.Source.Url})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
+		}
+		return out[i].Url < out[j].Url
+	})
 	return out
 }
 

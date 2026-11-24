@@ -130,14 +130,107 @@ func TestHarvestIDsAreStable(t *testing.T) {
 	assert.Equal(t, first.Plugins[0].Id, second.Plugins[0].Id)
 }
 
-func TestHarvestRepository(t *testing.T) {
+func TestHarvestPlugin(t *testing.T) {
+	repos := newFakeMarketplace(t)
+	repos.files["org/market"]["plugins/lokaal/.claude-plugin/plugin.json"] = `{"name":"lokaal-plugin","description":"Lokale skills","version":"2.0.0","author":{"name":"Geonovum"},"keywords":["geo"]}`
+	h := New(repos)
+
+	res, err := h.Harvest(context.Background(), models.Source{Id: "src-p", Type: models.SourceTypePlugin, Url: "https://github.com/org/market/tree/main/plugins/lokaal"})
+	require.NoError(t, err)
+	require.Len(t, res.Plugins, 1)
+	p := res.Plugins[0]
+	assert.Equal(t, "lokaal-plugin", p.Name)
+	assert.Equal(t, "2.0.0", p.Version)
+	assert.Equal(t, "Geonovum", p.Author)
+	assert.Equal(t, []string{"geo"}, p.Tags)
+	assert.Equal(t, "lokaal-plugin", res.Name)
+	require.Len(t, res.Skills, 1, "alleen skills onder de plugin-map")
+	assert.Equal(t, "a", res.Skills[0].Name)
+	assert.Equal(t, p.Id, *res.Skills[0].PluginID)
+	assert.Contains(t, strings.Join(res.Warnings, "\n"), "kapot")
+}
+
+func TestSameSkillGetsSameIDAcrossSources(t *testing.T) {
 	h := New(newFakeMarketplace(t))
-	res, err := h.Harvest(context.Background(), models.Source{Id: "src-2", Type: models.SourceTypeRepository, Url: "https://github.com/org/extern"})
+	market, err := h.Harvest(context.Background(), models.Source{Id: "m", Type: models.SourceTypeMarketplace, Url: "https://github.com/org/market"})
+	require.NoError(t, err)
+	plugin, err := h.Harvest(context.Background(), models.Source{Id: "p", Type: models.SourceTypePlugin, Url: "https://github.com/org/extern"})
+	require.NoError(t, err)
+	skill, err := h.Harvest(context.Background(), models.Source{Id: "s", Type: models.SourceTypeSkill, Url: "https://github.com/org/extern/blob/main/skills/c/SKILL.md"})
+	require.NoError(t, err)
+
+	var fromMarket models.Skill
+	for _, sk := range market.Skills {
+		if sk.Name == "c" {
+			fromMarket = sk
+		}
+	}
+	assert.Equal(t, fromMarket.Id, plugin.Skills[0].Id)
+	assert.Equal(t, fromMarket.Id, skill.Skills[0].Id)
+	assert.Equal(t, market.Plugins[1].Id, plugin.Plugins[0].Id, "plugin extern")
+}
+
+func TestHarvestPluginWithoutManifestUsesRepoName(t *testing.T) {
+	h := New(newFakeMarketplace(t))
+	res, err := h.Harvest(context.Background(), models.Source{Id: "src-p", Type: models.SourceTypePlugin, Url: "https://github.com/org/extern"})
+	require.NoError(t, err)
+	require.Len(t, res.Plugins, 1)
+	assert.Equal(t, "extern", res.Plugins[0].Name)
+	require.Len(t, res.Skills, 1)
+	assert.Equal(t, "c", res.Skills[0].Name)
+}
+
+func TestHarvestPluginWithoutSkills(t *testing.T) {
+	h := New(newFakeMarketplace(t))
+	_, err := h.Harvest(context.Background(), models.Source{Id: "src-p", Type: models.SourceTypePlugin, Url: "https://github.com/org/market/tree/main/bestaat-niet"})
+	assert.ErrorContains(t, err, "geen SKILL.md")
+}
+
+func TestHarvestSingleSkill(t *testing.T) {
+	h := New(newFakeMarketplace(t))
+	res, err := h.Harvest(context.Background(), models.Source{Id: "src-s", Type: models.SourceTypeSkill, Url: "https://github.com/org/market/blob/main/plugins/ander/skills/b/SKILL.md"})
 	require.NoError(t, err)
 	assert.Empty(t, res.Plugins)
 	require.Len(t, res.Skills, 1)
 	assert.Nil(t, res.Skills[0].PluginID)
-	assert.Equal(t, "c", res.Skills[0].Name)
+	assert.Equal(t, "b", res.Skills[0].Name)
+	assert.Equal(t, "b", res.Name)
+
+	// Een map met één skill werkt ook.
+	res, err = h.Harvest(context.Background(), models.Source{Id: "src-s", Type: models.SourceTypeSkill, Url: "https://github.com/org/market/tree/main/plugins/ander/skills/b"})
+	require.NoError(t, err)
+	require.Len(t, res.Skills, 1)
+}
+
+func TestHarvestSkillsInDirectory(t *testing.T) {
+	h := New(newFakeMarketplace(t))
+	res, err := h.Harvest(context.Background(), models.Source{Id: "src-s", Type: models.SourceTypeSkill, Url: "https://github.com/org/market/tree/main/plugins"})
+	require.NoError(t, err)
+	assert.Empty(t, res.Plugins)
+	require.Len(t, res.Skills, 2, "a en b, kapot geeft een waarschuwing")
+	assert.Equal(t, "org/market/plugins", res.Name)
+}
+
+func TestHarvestBrokenSingleSkill(t *testing.T) {
+	h := New(newFakeMarketplace(t))
+	_, err := h.Harvest(context.Background(), models.Source{Id: "src-s", Type: models.SourceTypeSkill, Url: "https://github.com/org/market/blob/main/plugins/lokaal/skills/kapot/SKILL.md"})
+	assert.ErrorContains(t, err, "geen geldige SKILL.md")
+}
+
+func TestHarvestMarketplaceInSubdirectory(t *testing.T) {
+	manifest := `{"name":"sub","plugins":[{"name":"p","source":"./p"}]}`
+	repos := &fakeRepos{
+		commits: map[string]string{"org/mono": marketSHA},
+		files: map[string]map[string]string{"org/mono": {
+			"market/.claude-plugin/marketplace.json": manifest,
+			"market/p/skills/x/SKILL.md":             skillMD("x"),
+			"p/skills/y/SKILL.md":                    skillMD("y"),
+		}},
+	}
+	res, err := New(repos).Harvest(context.Background(), models.Source{Id: "m", Type: models.SourceTypeMarketplace, Url: "https://github.com/org/mono/tree/main/market"})
+	require.NoError(t, err)
+	require.Len(t, res.Skills, 1)
+	assert.Equal(t, "x", res.Skills[0].Name, "relatief pad vanaf de marketplace-root")
 }
 
 func TestHarvestMarketplaceWithoutManifest(t *testing.T) {
@@ -166,7 +259,7 @@ func TestResolvePluginSource(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := resolvePluginSource(json.RawMessage(tc.raw), market, marketSHA)
+			got, err := resolvePluginSource(json.RawMessage(tc.raw), market, marketSHA, "")
 			if tc.wantErr {
 				assert.Error(t, err)
 				return

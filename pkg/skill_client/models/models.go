@@ -23,9 +23,12 @@ const (
 	// SourceTypeMarketplace is een repository met een
 	// .claude-plugin/marketplace.json die naar plugins verwijst.
 	SourceTypeMarketplace SourceType = "marketplace"
-	// SourceTypeRepository is een losse repository met één of meer SKILL.md
-	// bestanden, zonder marketplace.
-	SourceTypeRepository SourceType = "repository"
+	// SourceTypePlugin is één plugin: een map of repository met optioneel een
+	// .claude-plugin/plugin.json en één of meer SKILL.md bestanden.
+	SourceTypePlugin SourceType = "plugin"
+	// SourceTypeSkill is één SKILL.md, of alle SKILL.md bestanden onder een
+	// map of repository, zonder plugin.
+	SourceTypeSkill SourceType = "skill"
 )
 
 // Source is een geregistreerde bron die periodiek geharvest wordt.
@@ -60,21 +63,37 @@ type Plugin struct {
 
 // Skill is één SKILL.md, gevonden in een plugin of in een losse repository.
 type Skill struct {
-	Id          string         `json:"id" gorm:"column:id;primaryKey"`
-	SourceID    string         `json:"sourceId" gorm:"column:source_id;index"`
-	Source      *Source        `json:"-" gorm:"foreignKey:SourceID;references:Id"`
-	PluginID    *string        `json:"pluginId,omitempty" gorm:"column:plugin_id;index"`
-	Plugin      *Plugin        `json:"-" gorm:"foreignKey:PluginID;references:Id"`
-	Name        string         `json:"name" gorm:"column:name"`
-	Description string         `json:"description,omitempty" gorm:"column:description"`
-	RepoUrl     string         `json:"repoUrl" gorm:"column:repo_url"`
-	Path        string         `json:"path" gorm:"column:path"`
-	Ref         string         `json:"ref,omitempty" gorm:"column:ref"`
-	Frontmatter map[string]any `json:"frontmatter,omitempty" gorm:"column:frontmatter;serializer:json"`
-	Content     string         `json:"-" gorm:"column:content"`
-	Hash        string         `json:"-" gorm:"column:content_hash"`
-	CreatedAt   time.Time      `json:"createdAt" gorm:"column:created_at"`
-	LastCrawled time.Time      `json:"lastCrawledAt" gorm:"column:last_crawled_at"`
+	Id       string  `json:"id" gorm:"column:id;primaryKey"`
+	SourceID string  `json:"sourceId" gorm:"column:source_id;index"`
+	Source   *Source `json:"-" gorm:"foreignKey:SourceID;references:Id"`
+	PluginID *string `json:"pluginId,omitempty" gorm:"column:plugin_id;index"`
+	Plugin   *Plugin `json:"-" gorm:"foreignKey:PluginID;references:Id"`
+	// Occurrences zijn alle bronnen waarin de skill voorkomt, ook bronnen die
+	// hem niet bezitten. Zo blijven plugin en marketplaces zichtbaar.
+	Occurrences []SkillOccurrence `json:"-" gorm:"foreignKey:SkillID;references:Id;constraint:-"`
+	Name        string            `json:"name" gorm:"column:name"`
+	Description string            `json:"description,omitempty" gorm:"column:description"`
+	RepoUrl     string            `json:"repoUrl" gorm:"column:repo_url"`
+	Path        string            `json:"path" gorm:"column:path"`
+	Ref         string            `json:"ref,omitempty" gorm:"column:ref"`
+	Frontmatter map[string]any    `json:"frontmatter,omitempty" gorm:"column:frontmatter;serializer:json"`
+	Content     string            `json:"-" gorm:"column:content"`
+	Hash        string            `json:"-" gorm:"column:content_hash"`
+	CreatedAt   time.Time         `json:"createdAt" gorm:"column:created_at"`
+	LastCrawled time.Time         `json:"lastCrawledAt" gorm:"column:last_crawled_at"`
+}
+
+// SkillOccurrence legt vast dat een skill bij de laatste harvest van een bron
+// gevonden werd, en in welke plugin. Een skill staat maar één keer in het
+// register (bij één bron), maar kan via meerdere bronnen voorkomen.
+type SkillOccurrence struct {
+	SkillID  string  `gorm:"column:skill_id;primaryKey"`
+	SourceID string  `gorm:"column:source_id;primaryKey;index"`
+	Source   *Source `gorm:"foreignKey:SourceID;references:Id;constraint:OnDelete:CASCADE"`
+	PluginID *string `gorm:"column:plugin_id"`
+	// Geen foreign keys naar skills en plugins: die kunnen bij hun eigen bron
+	// verdwijnen terwijl een andere bron ze nog noemt.
+	Plugin *Plugin `gorm:"foreignKey:PluginID;references:Id;constraint:-"`
 }
 
 // SkillSummary is de lijstweergave van een skill.
@@ -85,6 +104,7 @@ type SkillSummary struct {
 	RepoUrl       string               `json:"repoUrl"`
 	Path          string               `json:"path"`
 	Plugin        *PluginRef           `json:"plugin,omitempty"`
+	Marketplaces  []MarketplaceRef     `json:"marketplaces,omitempty"`
 	Source        *SourceRef           `json:"source,omitempty"`
 	Organisation  *OrganisationSummary `json:"organisation,omitempty"`
 	CreatedAt     time.Time            `json:"createdAt"`
@@ -108,15 +128,22 @@ type PluginRef struct {
 type SourceRef struct {
 	Id   string     `json:"id"`
 	Type SourceType `json:"type"`
+	Name string     `json:"name,omitempty"`
 	Url  string     `json:"url"`
 }
 
-// SourceConfig is één bron uit sources.json. Dat bestand is de enige plek
-// waar bronnen worden beheerd; er is geen endpoint om bronnen toe te voegen.
-type SourceConfig struct {
-	Type            SourceType `json:"type"`
-	Url             string     `json:"url"`
-	OrganisationUri string     `json:"organisationUri,omitempty"`
+// MarketplaceRef is een marketplace-bron waarin de skill voorkomt.
+type MarketplaceRef struct {
+	Id   string `json:"id"`
+	Name string `json:"name,omitempty"`
+	Url  string `json:"url"`
+}
+
+// SourceInput registreert een bron. Harvesten gebeurt door de harvest-job.
+type SourceInput struct {
+	Type            SourceType `json:"type" binding:"required,oneof=marketplace plugin skill"`
+	Url             string     `json:"url" binding:"required,url"`
+	OrganisationUri string     `json:"organisationUri" binding:"required,url"`
 }
 
 type IdParams struct {

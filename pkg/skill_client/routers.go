@@ -58,28 +58,11 @@ func NewRouter(apiVersion string, controller *handler.SkillController) *fizz.Fiz
 	// Ruwe SKILL.md; op de engine zodat de handler het content type bepaalt.
 	g.GET("/v1/skills/:id/skill.md", controller.RetrieveSkillContent)
 
-	// Plugins
-	root.GET("/plugins", []fizz.OperationOption{
-		fizz.ID("listPlugins"),
-		fizz.Summary("List plugins"),
-		fizz.Description("Geeft alle plugins uit de geharvestte marketplaces."),
-		publicSecurity("skills:read"),
-		apiVersionHeader,
-	}, tonic.Handler(controller.ListPlugins, 200))
-
-	root.GET("/plugins/:id", []fizz.OperationOption{
-		fizz.ID("getPluginById"),
-		fizz.Summary("Get plugin by id"),
-		fizz.Description("Geeft één plugin terug."),
-		publicSecurity("skills:read"),
-		apiVersionHeader,
-	}, tonic.Handler(controller.RetrievePlugin, 200))
-
 	// Sources
 	root.GET("/sources", []fizz.OperationOption{
 		fizz.ID("listSources"),
 		fizz.Summary("List sources"),
-		fizz.Description("Geeft alle geregistreerde bronnen (marketplaces en losse repositories) met de status van de laatste harvest."),
+		fizz.Description("Geeft alle geregistreerde bronnen (marketplaces, plugins en losse skills) met de status van de laatste harvest."),
 		publicSecurity("sources:read"),
 		apiVersionHeader,
 	}, tonic.Handler(controller.ListSources, 200))
@@ -92,6 +75,13 @@ func NewRouter(apiVersion string, controller *handler.SkillController) *fizz.Fiz
 		apiVersionHeader,
 	}, tonic.Handler(controller.RetrieveSource, 200))
 
+	root.POST("/sources", []fizz.OperationOption{
+		fizz.ID("createSource"),
+		fizz.Summary("Create source"),
+		fizz.Description("Registreer een marketplace, plugin of losse skill, gekoppeld aan een organisatie. De harvest-job haalt de skills op."),
+		security("sources:write"),
+		apiVersionHeader,
+	}, tonic.Handler(controller.CreateSource, 201))
 
 	// Organisations
 	root.GET("/organisations", []fizz.OperationOption{

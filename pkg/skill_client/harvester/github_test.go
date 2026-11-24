@@ -28,6 +28,31 @@ func TestParseGitHubURL(t *testing.T) {
 	}
 }
 
+func TestParseGitHubLocation(t *testing.T) {
+	repo := RepoRef{"org", "repo"}
+	cases := map[string]Location{
+		"https://github.com/org/repo":                             {Repo: repo},
+		"https://github.com/org/repo.git/":                        {Repo: repo},
+		"org/repo":                                                {Repo: repo},
+		"https://github.com/org/repo/tree/main":                   {Repo: repo, Ref: "main"},
+		"https://github.com/org/repo/tree/v1/plugins/geo/":        {Repo: repo, Ref: "v1", Path: "plugins/geo"},
+		"https://github.com/org/repo/blob/main/skills/a/SKILL.md": {Repo: repo, Ref: "main", Path: "skills/a/SKILL.md"},
+	}
+	for in, want := range cases {
+		got, err := ParseGitHubLocation(in)
+		require.NoError(t, err, in)
+		assert.Equal(t, want, got, in)
+	}
+	for _, bad := range []string{"https://github.com/org/repo/issues/1", "https://github.com/org/repo/tree", "https://gitlab.com/org/repo"} {
+		_, err := ParseGitHubLocation(bad)
+		assert.Error(t, err, bad)
+	}
+
+	assert.Equal(t, "https://github.com/org/repo", Location{Repo: repo}.URL())
+	assert.Equal(t, "https://github.com/org/repo/tree/v1/plugins/geo", Location{Repo: repo, Ref: "v1", Path: "plugins/geo"}.URL())
+	assert.Equal(t, "https://github.com/org/repo/blob/main/skills/a/SKILL.md", Location{Repo: repo, Ref: "main", Path: "skills/a/SKILL.md"}.URL())
+}
+
 func TestGitHubClient(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/repos/org/repo/commits/HEAD", func(w http.ResponseWriter, r *http.Request) {

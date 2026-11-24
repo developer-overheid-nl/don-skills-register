@@ -19,11 +19,13 @@ import (
 
 const (
 	marketplaceManifest = ".claude-plugin/marketplace.json"
+	pluginManifest      = ".claude-plugin/plugin.json"
 	skillFileName       = "SKILL.md"
 )
 
-// idNamespace zorgt voor stabiele ids: dezelfde skill krijgt bij elke harvest
-// hetzelfde id, zodat links en zoekindex blijven kloppen.
+// idNamespace zorgt voor stabiele ids op basis van repository en pad: dezelfde
+// skill krijgt bij elke harvest, en via elke bron, hetzelfde id. Zo blijven
+// links en zoekindex kloppen en staat een skill maar één keer in het register.
 var idNamespace = uuid.MustParse("6f1d3c64-4a39-4f0e-9a0a-2f1b9d3a7c11")
 
 // Repository is wat de harvester van een git-host nodig heeft.
@@ -55,15 +57,17 @@ func New(repos Repository) *Harvester {
 
 // Harvest haalt alle plugins en skills op voor een bron.
 func (h *Harvester) Harvest(ctx context.Context, source models.Source) (*Result, error) {
-	repo, err := ParseGitHubURL(source.Url)
+	loc, err := ParseGitHubLocation(source.Url)
 	if err != nil {
 		return nil, err
 	}
 	switch source.Type {
 	case models.SourceTypeMarketplace:
-		return h.harvestMarketplace(ctx, source, repo)
-	case models.SourceTypeRepository:
-		return h.harvestRepository(ctx, source, repo)
+		return h.harvestMarketplace(ctx, source, loc)
+	case models.SourceTypePlugin:
+		return h.harvestPlugin(ctx, source, loc)
+	case models.SourceTypeSkill:
+		return h.harvestSkills(ctx, source, loc)
 	default:
 		return nil, fmt.Errorf("onbekend brontype %q", source.Type)
 	}
@@ -90,22 +94,37 @@ type marketplacePlugin struct {
 	Source      json.RawMessage `json:"source"`
 }
 
+// pluginFile volgt het formaat van .claude-plugin/plugin.json.
+type pluginFile struct {
+	Name        string          `json:"name"`
+	DisplayName string          `json:"displayName"`
+	Description string          `json:"description"`
+	Version     string          `json:"version"`
+	Category    string          `json:"category"`
+	Keywords    []string        `json:"keywords"`
+	Author      json.RawMessage `json:"author"`
+}
+
 // pluginLocation is waar de bestanden van een plugin staan.
 type pluginLocation struct {
 	repo RepoRef
 	ref  string
 	dir  string
+	// file beperkt de harvest tot één SKILL.md.
+	file string
 }
 
-func (h *Harvester) harvestMarketplace(ctx context.Context, source models.Source, repo RepoRef) (*Result, error) {
-	sha, err := h.repos.ResolveCommit(ctx, repo, "")
+func (h *Harvester) harvestMarketplace(ctx context.Context, source models.Source, loc Location) (*Result, error) {
+	repo := loc.Repo
+	sha, err := h.repos.ResolveCommit(ctx, repo, loc.Ref)
 	if err != nil {
 		return nil, err
 	}
-	raw, err := h.repos.ReadFile(ctx, repo, sha, marketplaceManifest)
+	manifestPath := path.Join(loc.Path, marketplaceManifest)
+	raw, err := h.repos.ReadFile(ctx, repo, sha, manifestPath)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
-			return nil, fmt.Errorf("%s bevat geen %s", repo, marketplaceManifest)
+			return nil, fmt.Errorf("%s bevat geen %s", loc.URL(), marketplaceManifest)
 		}
 		return nil, err
 	}
@@ -120,24 +139,24 @@ func (h *Harvester) harvestMarketplace(ctx context.Context, source models.Source
 			result.Warnings = append(result.Warnings, "plugin zonder naam overgeslagen")
 			continue
 		}
-		loc, err := resolvePluginSource(mp.Source, repo, sha)
+		pluginLoc, err := resolvePluginSource(mp.Source, repo, sha, loc.Path)
 		if err != nil {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("plugin %q: %v", mp.Name, err))
 			continue
 		}
 		plugin := models.Plugin{
-			Id:          stableID("plugin", source.Id, mp.Name),
+			Id:          stableID("plugin", pluginLoc.repo.String(), pluginLoc.dir),
 			SourceID:    source.Id,
 			Name:        mp.Name,
 			DisplayName: mp.DisplayName,
 			Description: mp.Description,
 			Version:     mp.Version,
 			Author:      authorName(mp.Author),
-			RepoUrl:     loc.repo.URL(),
+			RepoUrl:     pluginLoc.repo.URL(),
 			Category:    mp.Category,
 			Tags:        mergeTags(mp.Tags, mp.Keywords),
 		}
-		skills, warnings, err := h.collectSkills(ctx, source, &plugin.Id, loc)
+		skills, warnings, err := h.collectSkills(ctx, source, &plugin.Id, pluginLoc)
 		result.Warnings = append(result.Warnings, prefixAll("plugin "+mp.Name+": ", warnings)...)
 		if err != nil {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("plugin %q: %v", mp.Name, err))
@@ -149,12 +168,93 @@ func (h *Harvester) harvestMarketplace(ctx context.Context, source models.Source
 	return result, nil
 }
 
-func (h *Harvester) harvestRepository(ctx context.Context, source models.Source, repo RepoRef) (*Result, error) {
-	skills, warnings, err := h.collectSkills(ctx, source, nil, pluginLocation{repo: repo})
+// harvestPlugin harvest één plugin: een map (of repository) met optioneel een
+// .claude-plugin/plugin.json en de SKILL.md bestanden daaronder.
+func (h *Harvester) harvestPlugin(ctx context.Context, source models.Source, loc Location) (*Result, error) {
+	sha, err := h.repos.ResolveCommit(ctx, loc.Repo, loc.Ref)
 	if err != nil {
 		return nil, err
 	}
-	return &Result{Name: repo.String(), Skills: skills, Warnings: warnings}, nil
+	var manifest pluginFile
+	raw, err := h.repos.ReadFile(ctx, loc.Repo, sha, path.Join(loc.Path, pluginManifest))
+	switch {
+	case err == nil:
+		if err := json.Unmarshal(raw, &manifest); err != nil {
+			return nil, fmt.Errorf("%s: ongeldige JSON: %w", pluginManifest, err)
+		}
+	case !errors.Is(err, ErrNotFound):
+		return nil, err
+	}
+
+	name := strings.TrimSpace(manifest.Name)
+	if name == "" {
+		// Zonder plugin.json leidt Claude Code de naam af van de map.
+		name = loc.Repo.Repo
+		if loc.Path != "" {
+			name = path.Base(loc.Path)
+		}
+	}
+	plugin := models.Plugin{
+		Id:          stableID("plugin", loc.Repo.String(), loc.Path),
+		SourceID:    source.Id,
+		Name:        name,
+		DisplayName: manifest.DisplayName,
+		Description: manifest.Description,
+		Version:     manifest.Version,
+		Author:      authorName(manifest.Author),
+		RepoUrl:     loc.Repo.URL(),
+		Category:    manifest.Category,
+		Tags:        mergeTags(manifest.Keywords),
+	}
+	skills, warnings, err := h.collectSkills(ctx, source, &plugin.Id, pluginLocation{repo: loc.Repo, ref: sha, dir: loc.Path})
+	if err != nil {
+		return nil, err
+	}
+	if len(skills) == 0 {
+		return nil, noSkillsError(loc, warnings)
+	}
+	return &Result{
+		Name:        name,
+		Description: manifest.Description,
+		Plugins:     []models.Plugin{plugin},
+		Skills:      skills,
+		Warnings:    warnings,
+	}, nil
+}
+
+// harvestSkills harvest losse skills zonder plugin: één SKILL.md (een
+// …/blob/… URL), of alle SKILL.md bestanden onder een map of repository.
+func (h *Harvester) harvestSkills(ctx context.Context, source models.Source, loc Location) (*Result, error) {
+	sha, err := h.repos.ResolveCommit(ctx, loc.Repo, loc.Ref)
+	if err != nil {
+		return nil, err
+	}
+	target := pluginLocation{repo: loc.Repo, ref: sha, dir: loc.Path}
+	if path.Base(loc.Path) == skillFileName {
+		target.dir = path.Dir(loc.Path)
+		target.file = loc.Path
+	}
+	skills, warnings, err := h.collectSkills(ctx, source, nil, target)
+	if err != nil {
+		return nil, err
+	}
+	if len(skills) == 0 {
+		return nil, noSkillsError(loc, warnings)
+	}
+	name := loc.Repo.String()
+	if len(skills) == 1 {
+		name = skills[0].Name
+	} else if loc.Path != "" {
+		name += "/" + loc.Path
+	}
+	return &Result{Name: name, Skills: skills, Warnings: warnings}, nil
+}
+
+func noSkillsError(loc Location, warnings []string) error {
+	if len(warnings) > 0 {
+		return fmt.Errorf("geen geldige SKILL.md gevonden in %s: %s", loc.URL(), strings.Join(warnings, "; "))
+	}
+	return fmt.Errorf("geen SKILL.md gevonden in %s", loc.URL())
 }
 
 // collectSkills zoekt alle SKILL.md bestanden onder loc.dir.
@@ -173,11 +273,17 @@ func (h *Harvester) collectSkills(ctx context.Context, source models.Source, plu
 	}
 
 	prefix := strings.Trim(loc.dir, "/")
+	if prefix == "." {
+		prefix = ""
+	}
 	if prefix != "" {
 		prefix += "/"
 	}
 	var paths []string
 	for _, p := range files {
+		if loc.file != "" && p != loc.file {
+			continue
+		}
 		if path.Base(p) == skillFileName && strings.HasPrefix(p, prefix) && !strings.Contains(p, "node_modules/") {
 			paths = append(paths, p)
 		}
@@ -199,7 +305,7 @@ func (h *Harvester) collectSkills(ctx context.Context, source models.Source, plu
 			continue
 		}
 		skills = append(skills, models.Skill{
-			Id:          stableID("skill", source.Id, loc.repo.String(), p),
+			Id:          stableID("skill", loc.repo.String(), p),
 			SourceID:    source.Id,
 			PluginID:    pluginID,
 			Name:        doc.Name,
@@ -217,10 +323,11 @@ func (h *Harvester) collectSkills(ctx context.Context, source models.Source, plu
 }
 
 // resolvePluginSource vertaalt het `source` veld van een marketplace-plugin
-// naar een locatie. Ondersteund: een relatief pad binnen de marketplace-repo,
+// naar een locatie. Ondersteund: een relatief pad vanaf de marketplace-root
+// (baseDir, de map met .claude-plugin/),
 // {"source":"github"}, en {"source":"url"} / {"source":"git-subdir"} naar
 // github.com. npm en andere hosts worden (nog) overgeslagen.
-func resolvePluginSource(raw json.RawMessage, marketplace RepoRef, marketplaceSHA string) (pluginLocation, error) {
+func resolvePluginSource(raw json.RawMessage, marketplace RepoRef, marketplaceSHA, baseDir string) (pluginLocation, error) {
 	var rel string
 	if err := json.Unmarshal(raw, &rel); err == nil {
 		rel = strings.TrimSpace(rel)
@@ -231,10 +338,11 @@ func resolvePluginSource(raw json.RawMessage, marketplace RepoRef, marketplaceSH
 		if strings.HasPrefix(clean, "..") {
 			return pluginLocation{}, fmt.Errorf("pad buiten de repository: %q", rel)
 		}
-		if clean == "." {
-			clean = ""
+		dir := path.Join(baseDir, clean)
+		if dir == "." {
+			dir = ""
 		}
-		return pluginLocation{repo: marketplace, ref: marketplaceSHA, dir: clean}, nil
+		return pluginLocation{repo: marketplace, ref: marketplaceSHA, dir: dir}, nil
 	}
 
 	var obj struct {

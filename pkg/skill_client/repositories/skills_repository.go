@@ -19,19 +19,19 @@ type SkillsRepository interface {
 	GetSkillByID(ctx context.Context, id string) (*models.Skill, error)
 	GetSkillFilterCounts(ctx context.Context, p *models.SkillFiltersParams) (*SkillFilterCounts, error)
 
-	ListPlugins(ctx context.Context, page, perPage int) ([]models.Plugin, models.Pagination, error)
-	GetPluginByID(ctx context.Context, id string) (*models.Plugin, error)
-
 	ListSources(ctx context.Context, page, perPage int) ([]models.Source, models.Pagination, error)
 	AllSources(ctx context.Context) ([]models.Source, error)
 	GetSourceByID(ctx context.Context, id string) (*models.Source, error)
 	FindSourceByURL(ctx context.Context, url string) (*models.Source, error)
 	SaveSource(ctx context.Context, source *models.Source) error
-	// DeleteSource verwijdert een bron met al zijn plugins en skills.
-	DeleteSource(ctx context.Context, id string) error
+	// PluginOwners en SkillOwners geven per id de bron die het item nu heeft.
+	PluginOwners(ctx context.Context, ids []string) (map[string]string, error)
+	SkillOwners(ctx context.Context, ids []string) (map[string]string, error)
 	// ReplaceSourceContent vervangt alle plugins en skills van een bron door
 	// het resultaat van de laatste harvest. Verdwenen items worden verwijderd.
-	ReplaceSourceContent(ctx context.Context, sourceID string, plugins []models.Plugin, skills []models.Skill) error
+	// occurrences vervangt de skills die in de bron voorkomen, ook die van een
+	// andere bron zijn.
+	ReplaceSourceContent(ctx context.Context, sourceID string, plugins []models.Plugin, skills []models.Skill, occurrences []models.SkillOccurrence) error
 
 	ListOrganisations(ctx context.Context, page, perPage int) ([]models.Organisation, models.Pagination, error)
 	FindOrganisationByURI(ctx context.Context, uri string) (*models.Organisation, error)
@@ -56,7 +56,9 @@ func (r *skillsRepository) preloadedSkills(ctx context.Context) *gorm.DB {
 	return r.db.WithContext(ctx).
 		Preload("Plugin").
 		Preload("Source").
-		Preload("Source.Organisation")
+		Preload("Source.Organisation").
+		Preload("Occurrences.Source").
+		Preload("Occurrences.Plugin")
 }
 
 // ListSkills filtert in-memory, net als het schema-register. Het register
@@ -133,14 +135,6 @@ func (r *skillsRepository) GetSkillFilterCounts(ctx context.Context, p *models.S
 	}, nil
 }
 
-func (r *skillsRepository) ListPlugins(ctx context.Context, page, perPage int) ([]models.Plugin, models.Pagination, error) {
-	return paginate[models.Plugin](r.db.WithContext(ctx).Order("name").Order("id"), page, perPage)
-}
-
-func (r *skillsRepository) GetPluginByID(ctx context.Context, id string) (*models.Plugin, error) {
-	return first[models.Plugin](r.db.WithContext(ctx), id)
-}
-
 func (r *skillsRepository) ListSources(ctx context.Context, page, perPage int) ([]models.Source, models.Pagination, error) {
 	return paginate[models.Source](r.db.WithContext(ctx).Preload("Organisation").Order("url"), page, perPage)
 }
@@ -170,25 +164,21 @@ func (r *skillsRepository) SaveSource(ctx context.Context, source *models.Source
 	return r.db.WithContext(ctx).Omit("Organisation").Save(source).Error
 }
 
-func (r *skillsRepository) DeleteSource(ctx context.Context, id string) error {
-	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := deleteMissing[models.Skill](tx, id, nil); err != nil {
-			return err
-		}
-		if err := deleteMissing[models.Plugin](tx, id, nil); err != nil {
-			return err
-		}
-		return tx.Delete(&models.Source{}, "id = ?", id).Error
-	})
+func (r *skillsRepository) PluginOwners(ctx context.Context, ids []string) (map[string]string, error) {
+	return owners[models.Plugin](r.db.WithContext(ctx), ids)
 }
 
-func (r *skillsRepository) ReplaceSourceContent(ctx context.Context, sourceID string, plugins []models.Plugin, skills []models.Skill) error {
+func (r *skillsRepository) SkillOwners(ctx context.Context, ids []string) (map[string]string, error) {
+	return owners[models.Skill](r.db.WithContext(ctx), ids)
+}
+
+func (r *skillsRepository) ReplaceSourceContent(ctx context.Context, sourceID string, plugins []models.Plugin, skills []models.Skill, occurrences []models.SkillOccurrence) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		createdAt, err := existingCreatedAt[models.Skill](tx, sourceID)
+		createdAt, err := existingCreatedAt[models.Skill](tx, ids(skills, func(s models.Skill) string { return s.Id }))
 		if err != nil {
 			return err
 		}
-		pluginCreatedAt, err := existingCreatedAt[models.Plugin](tx, sourceID)
+		pluginCreatedAt, err := existingCreatedAt[models.Plugin](tx, ids(plugins, func(p models.Plugin) string { return p.Id }))
 		if err != nil {
 			return err
 		}
@@ -218,7 +208,15 @@ func (r *skillsRepository) ReplaceSourceContent(ctx context.Context, sourceID st
 			}
 		}
 		if len(skills) > 0 {
-			if err := tx.Omit("Source", "Plugin").Clauses(clause.OnConflict{UpdateAll: true}).Create(&skills).Error; err != nil {
+			if err := tx.Omit("Source", "Plugin", "Occurrences").Clauses(clause.OnConflict{UpdateAll: true}).Create(&skills).Error; err != nil {
+				return err
+			}
+		}
+		if err := tx.Where("source_id = ?", sourceID).Delete(&models.SkillOccurrence{}).Error; err != nil {
+			return err
+		}
+		if len(occurrences) > 0 {
+			if err := tx.Omit("Source", "Plugin").Create(&occurrences).Error; err != nil {
 				return err
 			}
 		}
@@ -274,9 +272,14 @@ type idWithCreatedAt struct {
 	CreatedAt time.Time
 }
 
-func existingCreatedAt[T any](tx *gorm.DB, sourceID string) (map[string]time.Time, error) {
+// existingCreatedAt zoekt de createdAt van bestaande items op id, ook als een
+// andere bron ze eerder had.
+func existingCreatedAt[T any](tx *gorm.DB, ids []string) (map[string]time.Time, error) {
+	if len(ids) == 0 {
+		return map[string]time.Time{}, nil
+	}
 	var rows []idWithCreatedAt
-	if err := tx.Model(new(T)).Select("id", "created_at").Where("source_id = ?", sourceID).Scan(&rows).Error; err != nil {
+	if err := tx.Model(new(T)).Select("id", "created_at").Where("id IN ?", ids).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 	out := make(map[string]time.Time, len(rows))
@@ -284,6 +287,34 @@ func existingCreatedAt[T any](tx *gorm.DB, sourceID string) (map[string]time.Tim
 		out[row.Id] = row.CreatedAt
 	}
 	return out, nil
+}
+
+type idWithSource struct {
+	Id       string
+	SourceID string
+}
+
+func owners[T any](db *gorm.DB, ids []string) (map[string]string, error) {
+	out := make(map[string]string, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	var rows []idWithSource
+	if err := db.Model(new(T)).Select("id", "source_id").Where("id IN ?", ids).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		out[row.Id] = row.SourceID
+	}
+	return out, nil
+}
+
+func ids[T any](items []T, id func(T) string) []string {
+	out := make([]string, len(items))
+	for i, item := range items {
+		out[i] = id(item)
+	}
+	return out
 }
 
 func createdAtOr(existing map[string]time.Time, id string, fallback time.Time) time.Time {

@@ -10,81 +10,130 @@ API van het Skills register (skills.developer.overheid.nl)
 
 Deze API registreert en ontsluit AI skills: `SKILL.md` bestanden volgens de
 [Agent Skills](https://agentskills.io)-conventie, zoals Claude Code, Codex en
-Cursor die gebruiken. Skills worden niet los aangeleverd, maar geharvest uit
-**bronnen**.
+Cursor die gebruiken. Skills worden geharvest uit **bronnen**: marketplaces,
+plugins of losse skills op GitHub, elk gekoppeld aan een organisatie.
 
 ## Bronnen, plugins en skills
 
-- **Bron**: een GitHub-repository die het register harvest. Bronnen staan in
-  [`sources.json`](sources.json) en kunnen niet via de API worden toegevoegd.
-- **Plugin**: een bundel skills uit een marketplace, met naam, versie, auteur
-  en tags uit `marketplace.json`.
+- **Bron**: een marketplace, plugin of losse skill op GitHub, gekoppeld aan een
+  organisatie. Bronnen worden geregistreerd met `POST /v1/sources`.
+- **Plugin**: een bundel skills, met naam, versie, auteur en tags uit
+  `marketplace.json` of `plugin.json`.
 - **Skill**: één `SKILL.md` bestand, met de frontmatter en de volledige inhoud.
 
-Er zijn twee soorten bronnen:
+Er zijn drie soorten bronnen:
 
-| Type          | Wat                                                                        | Voorbeeld                                                                                               |
-| ------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `marketplace` | Repository met `.claude-plugin/marketplace.json` die naar plugins verwijst | [developer-overheid-nl/skills-marketplace](https://github.com/developer-overheid-nl/skills-marketplace) |
-| `repository`  | Losse repository met één of meer `SKILL.md` bestanden                      | een repo met `skills/<naam>/SKILL.md`                                                                   |
+| Type          | Wat de harvester doet                                                                                           | Voorbeeld-URL                                                                  |
+| ------------- | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `marketplace` | Leest `.claude-plugin/marketplace.json`, volgt elke plugin en haalt daar de skills uit                          | `https://github.com/developer-overheid-nl/skills-marketplace`                  |
+| `plugin`      | Leest `.claude-plugin/plugin.json` (optioneel) en haalt alle `SKILL.md` bestanden onder de plugin-map op        | `https://github.com/developer-overheid-nl/skills-internet`                     |
+| `skill`       | Haalt één `SKILL.md` op (een `…/blob/…` URL), of alle `SKILL.md` bestanden onder een map, zonder plugin         | `https://github.com/org/repo/blob/main/skills/x/SKILL.md`                      |
+
+De URL is een GitHub-repository, of een map of bestand daarin
+(`…/tree/<ref>/<pad>` of `…/blob/<ref>/<pad>`). Zonder ref gebruikt de harvester
+de standaardbranch. Een ref met een `/` erin (zoals `feat/x`) wordt niet
+ondersteund; gebruik dan een tag of commit-SHA. Een `plugin` zonder `plugin.json`
+krijgt de naam van de map of repository, zoals in Claude Code.
 
 Bij een marketplace volgt de harvester per plugin het `source` veld:
 
-- een relatief pad (`"./plugins/x"`) binnen de marketplace-repository;
+- een relatief pad (`"./plugins/x"`) vanaf de marketplace-root (de map met
+  `.claude-plugin/`);
 - `{"source": "github", "repo": "owner/repo"}`;
 - `{"source": "url"}` en `{"source": "git-subdir"}` naar github.com.
 
 Andere hosts en npm-plugins worden nog overgeslagen en als waarschuwing op de
-bron (`lastError`) gezet. Binnen een plugin of repository telt elk `SKILL.md`
-bestand als skill (buiten `node_modules`). De frontmatter moet minimaal `name` en
+bron (`lastError`) gezet. Binnen een plugin telt elk `SKILL.md` bestand als
+skill (buiten `node_modules`). De frontmatter moet minimaal `name` en
 `description` bevatten; bestanden zonder die velden worden overgeslagen met een
-waarschuwing.
+waarschuwing. Levert een `plugin` of `skill` bron helemaal geen geldige skill
+op, dan mislukt de harvest en staat de reden in `lastError`.
 
 Ids zijn stabiel: dezelfde skill op hetzelfde pad krijgt bij elke harvest
 hetzelfde id. Skills die uit een bron verdwijnen, worden bij de volgende
 harvest verwijderd.
 
-## Bron toevoegen
+### Eén keer in het register
 
-Een bron toevoegen, wijzigen of verwijderen gaat via een pull request op
-[`sources.json`](sources.json):
+Het id van een plugin of skill hangt af van de repository en het pad, niet van
+de bron. Verwijzen twee bronnen naar dezelfde skill, bijvoorbeeld een
+marketplace en dezelfde plugin die los is geregistreerd, dan staat die skill er
+één keer in. Hij hoort bij de meest specifieke bron: `skill` gaat voor `plugin`,
+en `plugin` gaat voor `marketplace`. Bij hetzelfde type gaat de oudste bron
+voor. De skill krijgt de organisatie van die bron.
+
+Zo geef je een plugin uit een marketplace een eigen organisatie: registreer hem
+los als `plugin`. Na de volgende harvest van de marketplace staan de skills alleen
+nog onder de losse plugin; `createdAt` blijft behouden. Valt de losse bron weg,
+dan neemt de marketplace de skills bij zijn volgende harvest weer op.
+
+### Plugin en marketplaces bij een skill
+
+Tijdens het harvesten onthoudt het register per bron welke skills erin
+voorkomen en in welke plugin (tabel `skill_occurrences`). Dat gebeurt vóór het
+ontdubbelen, dus ook voor skills die bij een andere bron horen. Een skill laat
+daardoor altijd zien waar hij vandaan komt:
 
 ```json
-[
-  {
-    "type": "marketplace",
-    "url": "https://github.com/developer-overheid-nl/skills-marketplace"
-  },
-  {
-    "type": "repository",
-    "url": "https://github.com/organisatie/skills",
-    "organisationUri": "https://identifier.overheid.nl/tooi/id/oorg/oorg10103"
-  }
-]
+"plugin": { "id": "…", "name": "internet", "version": "1.2.0" },
+"marketplaces": [
+  { "id": "…", "name": "overheid-plugins", "url": "https://github.com/developer-overheid-nl/skills-marketplace" }
+],
+"source": { "id": "…", "type": "plugin", "name": "internet", "url": "https://github.com/developer-overheid-nl/skills-internet" }
 ```
 
-| Veld              | Verplicht | Omschrijving                                                         |
-| ----------------- | --------- | -------------------------------------------------------------------- |
-| `type`            | ja        | `marketplace` of `repository`                                        |
-| `url`             | ja        | GitHub-repository; `.git` en `/tree/...` worden weggehaald           |
-| `organisationUri` | nee       | TOOI-URI van de beherende organisatie; het label komt uit TOOI       |
+- `plugin`: de plugin van de skill. Is de skill los geregistreerd, dan de
+  plugin waarin hij via een andere bron voorkomt.
+- `marketplaces`: alle marketplaces waarin de skill voorkomt, op naam.
+- `source`: de bron waar de skill onder valt (zie hierboven).
 
-Bij het opstarten maakt de API de bronnen in de database gelijk aan dit
-bestand: nieuwe bronnen worden toegevoegd, type en organisatie van bestaande
-bronnen bijgewerkt, en bronnen die er niet meer in staan worden met hun
-plugins en skills verwijderd. Een ongeldig of ontbrekend bestand stopt het
-opstarten, zodat er nooit per ongeluk bronnen worden gewist.
+Verdwijnt een skill uit een bron, dan verdwijnt die bron bij de volgende harvest
+ook bij de skill.
+
+## Bron toevoegen
+
+Net als repositories en git-organisaties in het OSS-register, met een
+client-credentials token met scope `sources:write`:
+
+```bash
+curl -X POST https://api.developer.overheid.nl/skills-register/v1/sources \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "marketplace",
+    "url": "https://github.com/developer-overheid-nl/skills-marketplace",
+    "organisationUri": "https://identifier.overheid.nl/tooi/id/oorg/oorg10103"
+  }'
+```
+
+| Veld              | Verplicht | Omschrijving                                                                     |
+| ----------------- | --------- | -------------------------------------------------------------------------------- |
+| `type`            | ja        | `marketplace`, `plugin` of `skill`                                               |
+| `url`             | ja        | GitHub-URL van de repository, map of `SKILL.md`; `.git` en een `/` aan het eind worden weggehaald |
+| `organisationUri` | ja        | TOOI-URI van de beherende organisatie; onbekende organisaties worden met het label uit TOOI aangemaakt |
+
+Antwoorden:
+
+- `201`: de bron is geregistreerd. Hij wordt direct op de achtergrond
+  geharvest; het resultaat staat daarna in `lastHarvestedAt` en `lastError`
+  van de bron.
+- `400`: ongeldig type, geen GitHub-URL, of een organisatie die niet in TOOI
+  staat.
+- `409`: de bron (dezelfde genormaliseerde URL) bestaat al.
+
+Wijzigen en verwijderen kan nog niet via de API (zie [Nog open](#nog-open)).
 
 ## Harvesten
 
-Harvesten gebeurt alleen door een job, net als bij de andere registers. Er is
-geen endpoint om een harvest te starten. De job draait direct na het opstarten
-en daarna iedere ochtend om **06:00** (maximaal een uur). Per bron:
+Harvesten gebeurt door een job, net als bij de andere registers. Er is geen
+endpoint om een harvest te starten; alleen een nieuw geregistreerde bron wordt
+één keer direct geharvest. De job draait direct na het opstarten en daarna
+iedere ochtend om **06:00** (maximaal een uur). Per bron:
 
-1. de commit bepalen: de standaardbranch, of de `ref`/`sha` die een plugin in
-   `marketplace.json` opgeeft;
-2. de bestandenlijst ophalen en `marketplace.json` en de `SKILL.md` bestanden
-   lezen;
+1. de commit bepalen: de ref uit de URL of de standaardbranch, en voor
+   plugins in een marketplace de `ref`/`sha` uit `marketplace.json`;
+2. de bestandenlijst ophalen en `marketplace.json`, `plugin.json` en de
+   `SKILL.md` bestanden lezen;
 3. alle plugins en skills van de bron in één transactie vervangen door het
    resultaat;
 4. de skills naar Typesense sturen.
@@ -102,7 +151,6 @@ Omgevingsvariabelen:
 - `GITHUB_TOKEN`: token voor de GitHub API, nodig in test en productie.
 - `GITHUB_API_BASE`: standaard `https://api.github.com`.
 - `GITHUB_RAW_BASE`: standaard `https://raw.githubusercontent.com`.
-- `SOURCES_FILE`: pad naar de bronnen, standaard `./sources.json`.
 - `DISABLE_HARVEST`: zet op `true` om de harvest-job niet te starten.
 
 ## Endpoints
@@ -113,10 +161,9 @@ Omgevingsvariabelen:
 | GET     | `/v1/skills/filters`       | Filteropties met counts                                     |
 | GET     | `/v1/skills/{id}`          | Skill met frontmatter en inhoud                             |
 | GET     | `/v1/skills/{id}/skill.md` | Ruwe `SKILL.md`                                             |
-| GET     | `/v1/plugins`              | Plugins uit marketplaces                                    |
-| GET     | `/v1/plugins/{id}`         | Eén plugin                                                  |
 | GET     | `/v1/sources`              | Bronnen met status van de laatste harvest                   |
 | GET     | `/v1/sources/{id}`         | Eén bron                                                    |
+| POST    | `/v1/sources`              | Bron registreren (marketplace, plugin of skill)             |
 | GET     | `/v1/organisations`        | Organisaties                                                |
 | POST    | `/v1/organisations`        | Organisatie aanmaken (label via TOOI)                       |
 | GET     | `/v1/openapi.json`         | De OpenAPI-specificatie                                     |
@@ -277,21 +324,23 @@ repository, met de gedeelde workflows uit
 
 ## Nog open
 
-- **Losse skills.** Het type `repository` maakt losse skill-repositories al
-  mogelijk. Nog besluiten of we die willen opnemen, of alleen marketplaces.
-- **Organisatie per bron of per plugin.** De organisatie hangt nu aan de bron.
-  In één marketplace zitten plugins van verschillende organisaties (MinBZK,
-  Rijks ICT Gilde, Geonovum), dus waarschijnlijk moet de organisatie per plugin,
-  bijvoorbeeld afgeleid uit de GitHub-owner of uit `author` in
-  `marketplace.json`. De seed-marketplace heeft nu geen organisatie.
+- **Bronnen wijzigen en verwijderen.** Er is alleen `POST /v1/sources`. Een
+  `PUT` (andere organisatie of type) en `DELETE` (met de plugins en skills van
+  de bron) moeten er nog bij.
+- **Organisatie per bron of per plugin.** De organisatie hangt aan de bron. In
+  één marketplace zitten plugins van verschillende organisaties (MinBZK, Rijks
+  ICT Gilde, Geonovum); die krijgen allemaal de organisatie van de marketplace,
+  tenzij de plugin los is geregistreerd met een eigen organisatie (zie
+  [Eén keer in het register](#één-keer-in-het-register)).
 - **Alleen GitHub.** npm-plugins en andere git-hosts (GitLab, code.overheid.nl)
   worden overgeslagen met een waarschuwing.
 - **Domein en gateway.** `skills.developer.overheid.nl` en het gateway-pad
   `/skills-register/v1` zijn aannames.
-- **Infra.** Nog nodig: een overlay in `don-infra`, de repository variable
-  `KUSTOMIZE_PATH`, een `GITHUB_TOKEN` secret in het cluster, en de scopes
-  `skills:read`, `sources:read`, `organisations:read` en `organisations:write`
-  in Keycloak.
+- **Infra.** De test-overlay staat in
+  [don-infra#513](https://github.com/developer-overheid-nl/don-infra/pull/513).
+  Nog nodig: het DB-schema, de secret `skills-secrets` (met `GITHUB_TOKEN`), de
+  scopes `skills:read`, `sources:read`, `sources:write`, `organisations:read` en
+  `organisations:write` in Keycloak, en een productie-overlay.
 - **Frontend.** Er is nog geen frontend; de Typesense-detail-URL wijst naar
   `https://skills.developer.overheid.nl/skills/{id}`.
 

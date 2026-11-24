@@ -35,9 +35,8 @@ func TestResponsesMatchOpenAPI(t *testing.T) {
 		},
 		Warnings: []string{"plugin npm-ding: npm wordt niet ondersteund"},
 	}}
-	router, svc := setup(t, stub)
-	syncAndHarvest(t, svc, models.SourceConfig{Type: models.SourceTypeMarketplace, Url: "https://github.com/org/market", OrganisationUri: orgURI})
-	sourceID := listSources(t, router)[0].Id
+	router, _ := setup(t, stub)
+	sourceID := createSource(t, router, models.SourceTypeMarketplace, "https://github.com/org/market").Id
 
 	cases := []struct {
 		method, path string
@@ -52,12 +51,12 @@ func TestResponsesMatchOpenAPI(t *testing.T) {
 		{http.MethodGet, "/skills/bestaat-niet", nil, http.StatusNotFound},
 		{http.MethodGet, "/skills/s1/skill.md", nil, http.StatusOK},
 		{http.MethodGet, "/skills/bestaat-niet/skill.md", nil, http.StatusNotFound},
-		{http.MethodGet, "/plugins", nil, http.StatusOK},
-		{http.MethodGet, "/plugins/p1", nil, http.StatusOK},
-		{http.MethodGet, "/plugins/bestaat-niet", nil, http.StatusNotFound},
 		{http.MethodGet, "/sources", nil, http.StatusOK},
 		{http.MethodGet, "/sources/" + sourceID, nil, http.StatusOK},
 		{http.MethodGet, "/sources/bestaat-niet", nil, http.StatusNotFound},
+		{http.MethodPost, "/sources", map[string]any{"type": "plugin", "url": "https://github.com/org/repo/tree/main/plugins/geo", "organisationUri": orgURI}, http.StatusCreated},
+		{http.MethodPost, "/sources", map[string]any{"type": "marketplace", "url": "https://github.com/org/market", "organisationUri": orgURI}, http.StatusConflict},
+		{http.MethodPost, "/sources", map[string]any{"type": "repository", "url": "https://github.com/org/x", "organisationUri": orgURI}, http.StatusBadRequest},
 		{http.MethodGet, "/organisations", nil, http.StatusOK},
 		{http.MethodPost, "/organisations", map[string]any{"uri": "https://identifier.overheid.nl/tooi/id/oorg/oorg10000"}, http.StatusCreated},
 		{http.MethodPost, "/organisations", map[string]any{"uri": orgURI}, http.StatusConflict},

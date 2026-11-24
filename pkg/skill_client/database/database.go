@@ -12,6 +12,7 @@ var Models = []any{
 	&models.Source{},
 	&models.Plugin{},
 	&models.Skill{},
+	&models.SkillOccurrence{},
 }
 
 // Connect maakt verbinding met Postgres en voert de migraties uit.

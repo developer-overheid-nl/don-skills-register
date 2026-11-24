@@ -56,22 +56,6 @@ func (c *SkillController) RetrieveSkillContent(ctx *gin.Context) {
 	ctx.Data(http.StatusOK, "text/markdown; charset=utf-8", []byte(content))
 }
 
-// ListPlugins handles GET /plugins
-func (c *SkillController) ListPlugins(ctx *gin.Context, p *models.ListParams) ([]models.Plugin, error) {
-	p.Page, p.PerPage = normalizePagination(p.Page, p.PerPage)
-	plugins, pagination, err := c.Service.ListPlugins(ctx.Request.Context(), p)
-	if err != nil {
-		return nil, err
-	}
-	commonpagination.SetHeaders(ctx.Request, ctx.Header, pagination)
-	return plugins, nil
-}
-
-// RetrievePlugin handles GET /plugins/:id
-func (c *SkillController) RetrievePlugin(ctx *gin.Context, p *models.IdParams) (*models.Plugin, error) {
-	return c.Service.RetrievePlugin(ctx.Request.Context(), p.Id)
-}
-
 // ListSources handles GET /sources
 func (c *SkillController) ListSources(ctx *gin.Context, p *models.ListParams) ([]models.Source, error) {
 	p.Page, p.PerPage = normalizePagination(p.Page, p.PerPage)
@@ -88,6 +72,10 @@ func (c *SkillController) RetrieveSource(ctx *gin.Context, p *models.IdParams) (
 	return c.Service.RetrieveSource(ctx.Request.Context(), p.Id)
 }
 
+// CreateSource handles POST /sources
+func (c *SkillController) CreateSource(ctx *gin.Context, body *models.SourceInput) (*models.Source, error) {
+	return c.Service.CreateSource(ctx.Request.Context(), *body)
+}
 
 // ListOrganisations handles GET /organisations
 func (c *SkillController) ListOrganisations(ctx *gin.Context, p *models.ListParams) ([]models.Organisation, error) {

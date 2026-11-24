@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"log"
 	"net/http"
 	"net/url"
@@ -16,7 +15,6 @@ import (
 	"github.com/developer-overheid-nl/don-skills-register/pkg/skill_client/harvester"
 	"github.com/developer-overheid-nl/don-skills-register/pkg/skill_client/helpers/util"
 	"github.com/developer-overheid-nl/don-skills-register/pkg/skill_client/jobs"
-	"github.com/developer-overheid-nl/don-skills-register/pkg/skill_client/models"
 	"github.com/developer-overheid-nl/don-skills-register/pkg/skill_client/repositories"
 	"github.com/developer-overheid-nl/don-skills-register/pkg/skill_client/services"
 )
@@ -40,12 +38,8 @@ func main() {
 	service := services.NewSkillService(repo, harvester.New(harvester.NewGitHubClientFromEnv()))
 	controller := handler.NewSkillController(service)
 
-	ctx := context.Background()
-	if err := service.SyncSources(ctx, loadSources(envOr("SOURCES_FILE", "./sources.json"))); err != nil {
-		log.Fatalf("bronnen uit configuratie verwerken mislukt: %v", err)
-	}
 	if os.Getenv("DISABLE_HARVEST") != "true" {
-		jobs.NewHarvestJob(ctx, service)
+		jobs.NewHarvestJob(context.Background(), service)
 	}
 
 	router := api.NewRouter(version, controller)
@@ -64,25 +58,4 @@ func postgresDSN() string {
 	q.Set("search_path", os.Getenv("DB_SCHEMA"))
 	u.RawQuery = q.Encode()
 	return u.String()
-}
-
-// loadSources leest de geconfigureerde bronnen. Het bestand is verplicht:
-// zonder configuratie zouden alle bestaande bronnen worden verwijderd.
-func loadSources(path string) []models.SourceConfig {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		log.Fatalf("bronnenbestand %s niet leesbaar: %v", path, err)
-	}
-	var sources []models.SourceConfig
-	if err := json.Unmarshal(raw, &sources); err != nil {
-		log.Fatalf("bronnenbestand %s is geen geldige JSON: %v", path, err)
-	}
-	return sources
-}
-
-func envOr(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }
