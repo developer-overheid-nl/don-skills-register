@@ -21,7 +21,7 @@
     },
     {
       "description": "Test",
-      "url": "https://api.don.apps.digilab.network/skills-register/v1"
+      "url": "https://api.don.projects.digilab.network/skills-register/v1"
     }
   ],
   "tags": [
