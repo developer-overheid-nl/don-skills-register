@@ -1,0 +1,16 @@
+name: Go CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  go-ci:
+    uses: developer-overheid-nl/.github/.github/workflows/go-ci.yml@v1
+    permissions:
+      contents: read
+    with:
+      coverage-threshold: 0

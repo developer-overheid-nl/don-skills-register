@@ -1,0 +1,15 @@
+name: changie
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+
+jobs:
+  changie:
+    uses: developer-overheid-nl/.github/.github/workflows/changie.yml@v1
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write

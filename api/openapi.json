@@ -1,0 +1,1264 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Skills-register API v1",
+    "version": "0.1.0",
+    "contact": {
+      "email": "developer.overheid@geonovum.nl",
+      "name": "Team developer.overheid.nl",
+      "url": "https://github.com/developer-overheid-nl/don-skills-register/issues"
+    },
+    "description": "API to access the Skills register of developer.overheid.nl: a catalog of AI skills (SKILL.md) harvested from plugin marketplaces, plugins and standalone skills on GitHub.\n\n## Harvesting\n\nA source is a marketplace, a plugin or a standalone skill on GitHub, linked to an organisation. Sources are registered with `POST /sources` (scope `sources:write`). A new source is harvested right away in the background; after that a daily job harvests every source and replaces its plugins and skills with the result. Skills that disappear from a source are removed.\n\nThe id of a plugin or skill is based on its repository and path, not on the source. A skill that is found through several sources (for example a marketplace and the same plugin registered on its own) is listed once, under the most specific source: `skill` before `plugin` before `marketplace`, and the oldest source when the type is the same. The skill gets the organisation of that source. Through `plugin` and `marketplaces` a skill still shows which plugin and which marketplaces it appears in.\n\n## Auth\n\nThis API distinguishes between public and private endpoints.\nPublic endpoints can be accessed with either an API key or a client credentials token.\nPrivate endpoints can only be accessed with a client credentials token.\n\n### API key\n\nUsing an API key, you can access all public endpoints of the Skills register.\nThese requests can also be made from the browser.\nRequest a read-only API key at https://apis.developer.overheid.nl/apis/key-aanvragen.\nSimply pass the obtained API key with each request using the `X-Api-Key` header.\n\n### Client credentials token\n\nUsing a client credentials token, you can access both public and private endpoints of the Skills register.\nTo obtain the token, you need to perform a `POST` request to `https://auth.developer.overheid.nl/realms/don/protocol/openid-connect/token` with the following Form URL Encoded body:\n- `grant_type`: `client_credentials`\n- `scope`: depending on the access you need and the client you are, you can request one or more of the following scopes:\n  - `skills:read`\n  - `sources:read`\n  - `sources:write`\n  - `organisations:read`\n  - `organisations:write`\n- `client_id`: the client id you received from us\n- `client_secret`: the client secret you received from us\n\nPass the obtained token with each request using the `Authorization` header. Example:\n\n`Authorization`: `Bearer {ACCESS_TOKEN}` (replace `{ACCESS_TOKEN}` with the obtained `access_token`)\n\n## Pagination\n\nPagination of collections is done using the `Link` header.\nThere are various libraries available (such as [parse-link-header](https://www.npmjs.com/package/parse-link-header) for Javascript) that can parse this header.\nAdditionally, the following headers provide extra support for implementing pagination in the client:\n- `Current-Page`: the current page in the collection\n- `Per-Page`: the number of items per page\n- `Total-Count`: the total number of items\n- `Total-Pages`: the total number of pages",
+    "license": {
+      "name": "EUPL-1.2",
+      "url": "https://eupl.eu/1.2/nl/"
+    }
+  },
+  "servers": [
+    {
+      "description": "Production",
+      "url": "https://api.developer.overheid.nl/skills-register/v1"
+    },
+    {
+      "description": "Test",
+      "url": "https://api.don.projects.digilab.network/skills-register/v1"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Public endpoints",
+      "description": "Endpoints that can be accessed with an API key or a client credentials token"
+    },
+    {
+      "name": "Skills",
+      "description": "AI skills (SKILL.md)"
+    },
+    {
+      "name": "Sources",
+      "description": "Registered marketplaces, plugins and standalone skills"
+    },
+    {
+      "name": "Organisations",
+      "description": "Organisations that manage sources"
+    },
+    {
+      "name": "Private endpoints",
+      "description": "Endpoints that require a client credentials token"
+    }
+  ],
+  "paths": {
+    "/skills": {
+      "get": {
+        "tags": [
+          "Public endpoints",
+          "Skills"
+        ],
+        "summary": "List skills",
+        "description": "Returns the AI skills harvested from all registered sources. Supports the same filter parameters as the skill filter endpoint.",
+        "operationId": "listSkills",
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "clientCredentials": [
+              "skills:read"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "headers": {
+              "API-Version": {
+                "$ref": "#/components/headers/APIVersion"
+              },
+              "Link": {
+                "$ref": "#/components/headers/Link"
+              },
+              "Total-Count": {
+                "$ref": "#/components/headers/TotalCount"
+              },
+              "Current-Page": {
+                "$ref": "#/components/headers/CurrentPage"
+              },
+              "Per-Page": {
+                "$ref": "#/components/headers/PerPage"
+              },
+              "Total-Pages": {
+                "$ref": "#/components/headers/TotalPages"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SkillSummary"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Page"
+          },
+          {
+            "$ref": "#/components/parameters/PerPage"
+          },
+          {
+            "$ref": "#/components/parameters/SearchFilter"
+          },
+          {
+            "$ref": "#/components/parameters/PluginFilter"
+          },
+          {
+            "$ref": "#/components/parameters/SourceFilter"
+          },
+          {
+            "$ref": "#/components/parameters/OrganisationFilter"
+          }
+        ]
+      }
+    },
+    "/skills/filters": {
+      "get": {
+        "tags": [
+          "Public endpoints",
+          "Skills"
+        ],
+        "summary": "List skill filters",
+        "description": "Returns all available filter options with counts, based on the active filters and the search term q.",
+        "operationId": "listSkillFilters",
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "clientCredentials": [
+              "skills:read"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "headers": {
+              "API-Version": {
+                "$ref": "#/components/headers/APIVersion"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/FilterGroup"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SearchFilter"
+          },
+          {
+            "$ref": "#/components/parameters/PluginFilter"
+          },
+          {
+            "$ref": "#/components/parameters/SourceFilter"
+          },
+          {
+            "$ref": "#/components/parameters/OrganisationFilter"
+          }
+        ]
+      }
+    },
+    "/skills/{id}": {
+      "get": {
+        "tags": [
+          "Public endpoints",
+          "Skills"
+        ],
+        "summary": "Get skill by id",
+        "description": "Returns a single skill including its frontmatter and the content of SKILL.md.",
+        "operationId": "getSkillById",
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "clientCredentials": [
+              "skills:read"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "headers": {
+              "API-Version": {
+                "$ref": "#/components/headers/APIVersion"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SkillDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ResourceId"
+          }
+        ]
+      }
+    },
+    "/skills/{id}/skill.md": {
+      "get": {
+        "tags": [
+          "Public endpoints",
+          "Skills"
+        ],
+        "summary": "Get raw SKILL.md",
+        "description": "Returns the raw SKILL.md of a skill as markdown.",
+        "operationId": "getSkillContent",
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "clientCredentials": [
+              "skills:read"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "headers": {
+              "API-Version": {
+                "$ref": "#/components/headers/APIVersion"
+              }
+            },
+            "content": {
+              "text/markdown": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ResourceId"
+          }
+        ]
+      }
+    },
+    "/sources": {
+      "get": {
+        "tags": [
+          "Public endpoints",
+          "Sources"
+        ],
+        "summary": "List sources",
+        "description": "Returns all registered sources (marketplaces, plugins and standalone skills) with the status of the last harvest.",
+        "operationId": "listSources",
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "clientCredentials": [
+              "sources:read"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "headers": {
+              "API-Version": {
+                "$ref": "#/components/headers/APIVersion"
+              },
+              "Link": {
+                "$ref": "#/components/headers/Link"
+              },
+              "Total-Count": {
+                "$ref": "#/components/headers/TotalCount"
+              },
+              "Current-Page": {
+                "$ref": "#/components/headers/CurrentPage"
+              },
+              "Per-Page": {
+                "$ref": "#/components/headers/PerPage"
+              },
+              "Total-Pages": {
+                "$ref": "#/components/headers/TotalPages"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Source"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Page"
+          },
+          {
+            "$ref": "#/components/parameters/PerPage"
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "Private endpoints",
+          "Sources"
+        ],
+        "summary": "Create source",
+        "description": "Registers a marketplace, plugin or standalone skill, linked to an organisation. The source is harvested right away in the background and daily afterwards by the harvest job; check lastHarvestedAt and lastError on the source for the result.",
+        "operationId": "createSource",
+        "security": [
+          {
+            "clientCredentials": [
+              "sources:write"
+            ]
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourceInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "headers": {
+              "API-Version": {
+                "$ref": "#/components/headers/APIVersion"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Source"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "409": {
+            "description": "Conflict",
+            "headers": {
+              "API-Version": {
+                "$ref": "#/components/headers/APIVersion"
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemJson"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sources/{id}": {
+      "get": {
+        "tags": [
+          "Public endpoints",
+          "Sources"
+        ],
+        "summary": "Get source by id",
+        "description": "Returns a single source.",
+        "operationId": "getSourceById",
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "clientCredentials": [
+              "sources:read"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "headers": {
+              "API-Version": {
+                "$ref": "#/components/headers/APIVersion"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Source"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ResourceId"
+          }
+        ]
+      }
+    },
+    "/organisations": {
+      "get": {
+        "tags": [
+          "Public endpoints",
+          "Organisations"
+        ],
+        "summary": "List organisations",
+        "description": "Returns all organisations.",
+        "operationId": "listOrganisations",
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "clientCredentials": [
+              "organisations:read"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "headers": {
+              "API-Version": {
+                "$ref": "#/components/headers/APIVersion"
+              },
+              "Link": {
+                "$ref": "#/components/headers/Link"
+              },
+              "Total-Count": {
+                "$ref": "#/components/headers/TotalCount"
+              },
+              "Current-Page": {
+                "$ref": "#/components/headers/CurrentPage"
+              },
+              "Per-Page": {
+                "$ref": "#/components/headers/PerPage"
+              },
+              "Total-Pages": {
+                "$ref": "#/components/headers/TotalPages"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/OrganisationSummary"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Page"
+          },
+          {
+            "$ref": "#/components/parameters/PerPage"
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "Private endpoints",
+          "Organisations"
+        ],
+        "summary": "Create organisation",
+        "description": "Create a new organisation. The label is looked up in TOOI when available.",
+        "operationId": "createOrganisation",
+        "security": [
+          {
+            "clientCredentials": [
+              "organisations:write"
+            ]
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created",
+            "headers": {
+              "API-Version": {
+                "$ref": "#/components/headers/APIVersion"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganisationSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "409": {
+            "description": "Conflict",
+            "headers": {
+              "API-Version": {
+                "$ref": "#/components/headers/APIVersion"
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemJson"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OrganisationSummary"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "tags": [
+          "Public endpoints"
+        ],
+        "summary": "OpenAPI specification",
+        "description": "Returns this OpenAPI specification.",
+        "operationId": "getOpenApiSpecification",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "headers": {
+              "API-Version": {
+                "$ref": "#/components/headers/APIVersion"
+              },
+              "access-control-allow-origin": {
+                "description": "Allows browsers to load the specification from any origin",
+                "schema": {
+                  "type": "string",
+                  "example": "*"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ProblemJson": {
+        "title": "Problem JSON",
+        "description": "Problem JSON schema representing errors and status code",
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "integer",
+            "description": "The HTTP status code generated by the origin server for this occurrence of the problem",
+            "example": 400
+          },
+          "title": {
+            "type": "string",
+            "description": "A short, human-readable summary of the problem type",
+            "example": "Request validation failed"
+          },
+          "detail": {
+            "type": "string",
+            "description": "A human-readable explanation specific to this occurrence of the problem",
+            "example": "id must be valid UTF-8"
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "List of errors encountered during processing",
+              "properties": {
+                "in": {
+                  "type": "string",
+                  "description": "Location of the error (e.g., body, query, header)",
+                  "enum": [
+                    "body",
+                    "path",
+                    "query"
+                  ]
+                },
+                "location": {
+                  "type": "string",
+                  "description": "Location in the document where the error occurred (JSON Pointer)",
+                  "example": "#/foo[0]/bar"
+                },
+                "code": {
+                  "type": "string",
+                  "description": "A code representing the type of error",
+                  "example": "date.format"
+                },
+                "detail": {
+                  "type": "string",
+                  "description": "A detailed message describing the error",
+                  "example": "must be ISO 8601"
+                }
+              },
+              "required": [
+                "in",
+                "location",
+                "code",
+                "detail"
+              ]
+            }
+          }
+        },
+        "required": [
+          "status",
+          "title",
+          "detail"
+        ]
+      },
+      "OrganisationUri": {
+        "title": "Organisation URI",
+        "description": "The unique identifier for an organisation",
+        "type": "string",
+        "format": "uri",
+        "example": "https://developer.overheid.nl"
+      },
+      "OrganisationSummary": {
+        "title": "Organisation summary",
+        "description": "An organisation from the catalog",
+        "type": "object",
+        "properties": {
+          "uri": {
+            "$ref": "#/components/schemas/OrganisationUri"
+          },
+          "label": {
+            "description": "The label of the organisation",
+            "type": "string",
+            "example": "developer.overheid.nl"
+          }
+        },
+        "required": [
+          "uri",
+          "label"
+        ]
+      },
+      "FilterOption": {
+        "type": "object",
+        "description": "A single option within a multi-select filter group.",
+        "required": [
+          "value",
+          "label",
+          "count",
+          "selected"
+        ],
+        "properties": {
+          "value": {
+            "type": "string",
+            "description": "The filter value to pass as a query parameter."
+          },
+          "label": {
+            "type": "string",
+            "description": "Human-readable label for the option."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional description of the filter value."
+          },
+          "count": {
+            "type": "integer",
+            "description": "Number of skills matching this option, given the other active filters."
+          },
+          "selected": {
+            "type": "boolean",
+            "description": "Whether this option is currently selected."
+          }
+        }
+      },
+      "FilterGroup": {
+        "type": "object",
+        "description": "A filter group with metadata and available options or current value.",
+        "required": [
+          "key",
+          "label",
+          "description",
+          "type"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "Unique key of the filter group, matching the query parameter name.",
+            "example": "plugin"
+          },
+          "label": {
+            "type": "string",
+            "description": "Human-readable label for the filter group."
+          },
+          "description": {
+            "type": "string",
+            "description": "Description of what this filter does."
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "toggle",
+              "date",
+              "multi-select",
+              "single-select"
+            ],
+            "description": "Filter type. toggle: on/off switch. date: date input (ISO 8601). multi-select: multiple values selectable. single-select: one value selectable from a list."
+          },
+          "value": {
+            "oneOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "description": "Current filter value. For toggle: boolean true or false. For date: ISO 8601 date (yyyy-MM-dd). Not present for multi-select."
+          },
+          "options": {
+            "type": "array",
+            "description": "Available options with counts. Only present for multi-select type.",
+            "items": {
+              "$ref": "#/components/schemas/FilterOption"
+            }
+          }
+        }
+      },
+      "ResourceId": {
+        "type": "string",
+        "description": "Unique identifier of the resource",
+        "example": "0b6c5d0e-3f0c-5f3a-9a43-2e8f6b7f1c2d"
+      },
+      "SourceType": {
+        "type": "string",
+        "description": "marketplace: a repository (or directory) with .claude-plugin/marketplace.json; all its plugins and their skills are harvested. plugin: a single plugin, a repository or directory with an optional .claude-plugin/plugin.json and one or more SKILL.md files. skill: a single SKILL.md (a .../blob/... URL), or all SKILL.md files under a repository or directory, without a plugin.",
+        "enum": [
+          "marketplace",
+          "plugin",
+          "skill"
+        ]
+      },
+      "PluginRef": {
+        "type": "object",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/ResourceId"
+          },
+          "name": {
+            "type": "string",
+            "description": "Plugin name",
+            "example": "standaarden"
+          },
+          "version": {
+            "type": "string",
+            "description": "Plugin version",
+            "example": "0.9.4"
+          }
+        }
+      },
+      "SourceRef": {
+        "type": "object",
+        "required": [
+          "id",
+          "type",
+          "url"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/ResourceId"
+          },
+          "type": {
+            "$ref": "#/components/schemas/SourceType"
+          },
+          "name": {
+            "type": "string",
+            "description": "Name of the source, from marketplace.json or plugin.json",
+            "example": "overheid-plugins"
+          },
+          "url": {
+            "type": "string",
+            "description": "Repository URL",
+            "format": "uri"
+          }
+        }
+      },
+      "MarketplaceRef": {
+        "type": "object",
+        "required": [
+          "id",
+          "url"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/ResourceId"
+          },
+          "name": {
+            "type": "string",
+            "description": "Marketplace name from marketplace.json",
+            "example": "overheid-plugins"
+          },
+          "url": {
+            "type": "string",
+            "description": "URL of the marketplace source",
+            "format": "uri",
+            "example": "https://github.com/developer-overheid-nl/skills-marketplace"
+          }
+        }
+      },
+      "SkillSummary": {
+        "title": "Skill summary",
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "repoUrl",
+          "path",
+          "createdAt",
+          "lastCrawledAt"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/ResourceId"
+          },
+          "name": {
+            "type": "string",
+            "description": "Name from the SKILL.md frontmatter",
+            "example": "ls-api"
+          },
+          "description": {
+            "type": "string",
+            "description": "Description from the SKILL.md frontmatter"
+          },
+          "repoUrl": {
+            "type": "string",
+            "description": "Repository containing the skill",
+            "format": "uri",
+            "example": "https://github.com/developer-overheid-nl/skills-standaarden"
+          },
+          "path": {
+            "type": "string",
+            "description": "Path of SKILL.md within the repository",
+            "example": "skills/ls-api/SKILL.md"
+          },
+          "plugin": {
+            "description": "The plugin the skill belongs to. For a skill registered on its own, the plugin it appears in via another source.",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PluginRef"
+              }
+            ]
+          },
+          "marketplaces": {
+            "type": "array",
+            "description": "Marketplaces the skill appears in, also when it is listed under a more specific source. Sorted by name.",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/MarketplaceRef"
+            }
+          },
+          "source": {
+            "description": "The source the skill is listed under. When several sources contain the skill, this is the most specific one.",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SourceRef"
+              }
+            ]
+          },
+          "organisation": {
+            "$ref": "#/components/schemas/OrganisationSummary"
+          },
+          "createdAt": {
+            "type": "string",
+            "description": "First time the skill was harvested",
+            "format": "date-time"
+          },
+          "lastCrawledAt": {
+            "type": "string",
+            "description": "Last time the skill was harvested",
+            "format": "date-time"
+          }
+        }
+      },
+      "SkillDetail": {
+        "title": "Skill detail",
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/SkillSummary"
+          },
+          {
+            "type": "object",
+            "required": [
+              "content"
+            ],
+            "properties": {
+              "ref": {
+                "type": "string",
+                "description": "Commit SHA the skill was harvested from"
+              },
+              "frontmatter": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "Full YAML frontmatter of SKILL.md"
+              },
+              "content": {
+                "type": "string",
+                "description": "Raw content of SKILL.md"
+              }
+            }
+          }
+        ]
+      },
+      "Source": {
+        "title": "Source",
+        "type": "object",
+        "required": [
+          "id",
+          "type",
+          "url",
+          "createdAt"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/ResourceId"
+          },
+          "type": {
+            "$ref": "#/components/schemas/SourceType"
+          },
+          "url": {
+            "type": "string",
+            "description": "GitHub URL of the repository, or of a directory or file in it (.../tree/<ref>/<path> or .../blob/<ref>/<path>)",
+            "format": "uri",
+            "example": "https://github.com/developer-overheid-nl/skills-marketplace"
+          },
+          "name": {
+            "type": "string",
+            "description": "Name of the marketplace, plugin or skill",
+            "example": "overheid-plugins"
+          },
+          "description": {
+            "type": "string",
+            "description": "Description of the marketplace"
+          },
+          "organisation": {
+            "$ref": "#/components/schemas/OrganisationSummary"
+          },
+          "lastHarvestedAt": {
+            "type": "string",
+            "description": "Time of the last harvest",
+            "format": "date-time"
+          },
+          "lastError": {
+            "type": "string",
+            "description": "Error or warnings from the last harvest, empty when the harvest succeeded without warnings"
+          },
+          "createdAt": {
+            "type": "string",
+            "description": "Time the source was first added",
+            "format": "date-time"
+          }
+        }
+      },
+      "SourceInput": {
+        "title": "SourceInput",
+        "type": "object",
+        "required": [
+          "type",
+          "url",
+          "organisationUri"
+        ],
+        "properties": {
+          "type": {
+            "$ref": "#/components/schemas/SourceType"
+          },
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "description": "GitHub URL of the repository, or of a directory or file in it (.../tree/<ref>/<path> or .../blob/<ref>/<path>). Refs containing a slash are not supported; use a tag or commit SHA instead.",
+            "example": "https://github.com/developer-overheid-nl/skills-marketplace"
+          },
+          "organisationUri": {
+            "type": "string",
+            "format": "uri",
+            "description": "TOOI URI of the organisation responsible for the source. Unknown organisations are created with their label from TOOI.",
+            "example": "https://identifier.overheid.nl/tooi/id/oorg/oorg10103"
+          }
+        }
+      }
+    },
+    "parameters": {
+      "Page": {
+        "name": "page",
+        "in": "query",
+        "required": false,
+        "description": "Page number (1-based).",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1
+        }
+      },
+      "PerPage": {
+        "name": "perPage",
+        "in": "query",
+        "required": false,
+        "description": "Number of results per page.",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 20
+        }
+      },
+      "SearchFilter": {
+        "name": "q",
+        "in": "query",
+        "required": false,
+        "description": "Search term. Matches skill name, skill description and plugin name.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "PluginFilter": {
+        "name": "plugin",
+        "in": "query",
+        "required": false,
+        "description": "Filter skills by plugin id. Repeat the parameter to filter on multiple plugins.",
+        "schema": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "explode": true
+      },
+      "SourceFilter": {
+        "name": "source",
+        "in": "query",
+        "required": false,
+        "description": "Filter skills by source id. Repeat the parameter to filter on multiple sources.",
+        "schema": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "explode": true
+      },
+      "OrganisationFilter": {
+        "name": "organisation",
+        "in": "query",
+        "required": false,
+        "description": "Filter skills by organisation URI. Repeat the parameter to filter on multiple organisations.",
+        "schema": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "explode": true
+      },
+      "ResourceId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "Unique identifier of the resource",
+        "schema": {
+          "$ref": "#/components/schemas/ResourceId"
+        }
+      }
+    },
+    "headers": {
+      "APIVersion": {
+        "description": "Semver of this API",
+        "schema": {
+          "type": "string",
+          "example": "1.0.0",
+          "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-((?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\\+([0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*))?$",
+          "externalDocs": {
+            "description": " /core/version-header: Return the full version number in a response header",
+            "url": "https://logius-standaarden.github.io/API-Design-Rules/#/core/version-header"
+          }
+        }
+      },
+      "Link": {
+        "description": "Links to the previous, next, last or first pages",
+        "schema": {
+          "type": "string",
+          "example": "<https://api.developer.overheid.nl/skills-register/v1/skills?page=2>; rel='prev', <https://api.developer.overheid.nl/skills-register/v1/skills?page=3>; rel='next'",
+          "externalDocs": {
+            "description": "W3C reference",
+            "url": "https://www.w3.org/wiki/LinkHeader"
+          }
+        }
+      },
+      "TotalCount": {
+        "description": "Total number of items available",
+        "schema": {
+          "type": "integer",
+          "example": 124
+        }
+      },
+      "CurrentPage": {
+        "description": "Current page number",
+        "schema": {
+          "type": "integer",
+          "example": 1
+        }
+      },
+      "PerPage": {
+        "description": "Number of items per page",
+        "schema": {
+          "type": "integer",
+          "example": 10
+        }
+      },
+      "TotalPages": {
+        "description": "Total number of pages available",
+        "schema": {
+          "type": "integer",
+          "example": 13
+        }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "Bad request",
+        "headers": {
+          "API-Version": {
+            "$ref": "#/components/headers/APIVersion"
+          }
+        },
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/ProblemJson"
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "Resource does not exist",
+        "headers": {
+          "API-Version": {
+            "$ref": "#/components/headers/APIVersion"
+          }
+        },
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/ProblemJson"
+            }
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "apiKey": {
+        "type": "apiKey",
+        "name": "X-Api-Key",
+        "in": "header",
+        "description": "Read-only API keys for public endpoints can be requested at https://apis.developer.overheid.nl/apis/key-aanvragen."
+      },
+      "clientCredentials": {
+        "type": "oauth2",
+        "flows": {
+          "clientCredentials": {
+            "scopes": {
+              "skills:read": "Read access to skills",
+              "sources:read": "Read access to sources",
+              "sources:write": "Register sources",
+              "organisations:read": "Read access to organisations",
+              "organisations:write": "Write access to organisations"
+            },
+            "tokenUrl": "https://auth.developer.overheid.nl/realms/don/protocol/openid-connect/token"
+          }
+        }
+      }
+    }
+  }
+}

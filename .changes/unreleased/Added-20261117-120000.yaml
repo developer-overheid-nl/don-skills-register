@@ -1,0 +1,3 @@
+kind: Added
+body: Initial Skills register API that harvests AI skills (`SKILL.md`) from plugin marketplaces, plugins and standalone skills on GitHub. Sources are registered with `POST /v1/sources`, linked to an organisation, and harvested daily by a job. Each skill shows its plugin and the marketplaces it appears in.
+time: 2026-11-17T12:00:00+01:00
