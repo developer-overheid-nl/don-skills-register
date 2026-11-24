@@ -132,8 +132,8 @@ iedere ochtend om **06:00** (maximaal een uur). Per bron:
 
 1. de commit bepalen: de ref uit de URL of de standaardbranch, en voor
    plugins in een marketplace de `ref`/`sha` uit `marketplace.json`;
-2. de bestandenlijst ophalen en `marketplace.json`, `plugin.json` en de
-   `SKILL.md` bestanden lezen;
+2. het archief van die commit downloaden en daaruit `marketplace.json`,
+   `plugin.json` en de `SKILL.md` bestanden lezen;
 3. alle plugins en skills van de bron in één transactie vervangen door het
    resultaat;
 4. de skills naar Typesense sturen.
@@ -141,16 +141,17 @@ iedere ochtend om **06:00** (maximaal een uur). Per bron:
 Mislukt een bron, dan blijft de vorige inhoud staan en komt de fout in
 `lastError` van de bron (`GET /v1/sources`).
 
-De harvester leest repositories via de GitHub API (commits en trees) en de
-bestanden via `raw.githubusercontent.com`. Zonder token geldt de GitHub-limiet
-van 60 API-calls per uur; met `GITHUB_TOKEN` is dat 5000. Een harvest kost
-ongeveer twee API-calls per repository.
+De harvester gebruikt geen GitHub API en geen token, dus de API rate limit
+geldt niet. De commit van een branch of tag komt via het git-protocol
+(`github.com/<owner>/<repo>.git/info/refs`, net als `git ls-remote`), de
+bestanden uit het archief van die commit
+(`codeload.github.com/<owner>/<repo>/tar.gz/<sha>`). Dat is één download per
+repository per harvest. Alleen publieke repositories worden ondersteund.
 
 Omgevingsvariabelen:
 
-- `GITHUB_TOKEN`: token voor de GitHub API, nodig in test en productie.
-- `GITHUB_API_BASE`: standaard `https://api.github.com`.
-- `GITHUB_RAW_BASE`: standaard `https://raw.githubusercontent.com`.
+- `GITHUB_BASE`: standaard `https://github.com`.
+- `GITHUB_CODELOAD_BASE`: standaard `https://codeload.github.com`.
 - `DISABLE_HARVEST`: zet op `true` om de harvest-job niet te starten.
 
 ## Endpoints
@@ -199,7 +200,6 @@ Logius) en Redocly.
    DB_PASSWORD=don
    DB_DBNAME=don_skills_v1
    DB_SCHEMA=public
-   GITHUB_TOKEN=<persoonlijk token, alleen leesrechten op publieke repos>
    ENABLE_TYPESENSE=false
    ```
 
@@ -338,7 +338,7 @@ repository, met de gedeelde workflows uit
   `/skills-register/v1` zijn aannames.
 - **Infra.** De test-overlay staat in
   [don-infra#513](https://github.com/developer-overheid-nl/don-infra/pull/513).
-  Nog nodig: het DB-schema, de secret `skills-secrets` (met `GITHUB_TOKEN`), de
+  Nog nodig: het DB-schema, de secret `skills-secrets` (alleen de `DB_*` variabelen), de
   scopes `skills:read`, `sources:read`, `sources:write`, `organisations:read` en
   `organisations:write` in Keycloak, en een productie-overlay.
 - **Frontend.** Er is nog geen frontend; de Typesense-detail-URL wijst naar

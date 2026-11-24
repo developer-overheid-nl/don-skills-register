@@ -1,22 +1,31 @@
 package harvester
 
 import (
+	"archive/tar"
+	"bufio"
+	"bytes"
+	"compress/gzip"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 const (
-	defaultGitHubAPIBase = "https://api.github.com"
-	defaultGitHubRawBase = "https://raw.githubusercontent.com"
-	maxFileBytes         = 1 << 20 // 1 MiB; een SKILL.md hoort ruim kleiner te zijn
+	defaultGitHubBase   = "https://github.com"
+	defaultCodeloadBase = "https://codeload.github.com"
+	maxFileBytes        = 1 << 20   // 1 MiB; een SKILL.md hoort ruim kleiner te zijn
+	maxRefsBytes        = 16 << 20  // lijst met branches en tags
+	maxArchiveBytes     = 100 << 20 // gedownload archief (gzip)
+	maxKeptBytes        = 64 << 20  // bewaarde bestandsinhoud per archief
+	archiveCacheSize    = 4
 )
 
 // ErrNotFound wordt teruggegeven als een bestand of repository niet bestaat.
@@ -57,100 +66,216 @@ func ParseGitHubURL(raw string) (RepoRef, error) {
 	return RepoRef{Owner: parts[0], Repo: strings.TrimSuffix(parts[1], ".git")}, nil
 }
 
-// GitHubClient leest repositories via de GitHub API (commits en trees) en
-// raw.githubusercontent.com (bestandsinhoud). De raw host telt niet mee voor
-// de API rate limit; zet GITHUB_TOKEN voor een ruimere limiet op de API.
+// GitHubClient leest publieke repositories zonder GitHub API en zonder token,
+// zodat de API rate limit niet geldt:
+//
+//   - een ref wordt een commit via het git-protocol
+//     (github.com/<owner>/<repo>.git/info/refs, net als git ls-remote);
+//   - bestanden komen uit het archief van die commit
+//     (codeload.github.com/<owner>/<repo>/tar.gz/<sha>), één download per
+//     repository per harvest.
 type GitHubClient struct {
-	APIBase string
-	RawBase string
-	Token   string
-	HTTP    *http.Client
+	GitHubBase   string
+	CodeloadBase string
+	HTTP         *http.Client
+
+	mu       sync.Mutex
+	archives map[string]*repoArchive
+	order    []string
+}
+
+// repoArchive is de inhoud van een repository op één commit.
+type repoArchive struct {
+	paths []string
+	files map[string][]byte
+	// tooLarge bevat bestanden die wel bestaan maar groter zijn dan maxFileBytes.
+	tooLarge map[string]bool
 }
 
 func NewGitHubClientFromEnv() *GitHubClient {
 	return &GitHubClient{
-		APIBase: envOr("GITHUB_API_BASE", defaultGitHubAPIBase),
-		RawBase: envOr("GITHUB_RAW_BASE", defaultGitHubRawBase),
-		Token:   strings.TrimSpace(os.Getenv("GITHUB_TOKEN")),
-		HTTP:    &http.Client{Timeout: 30 * time.Second},
+		GitHubBase:   envOr("GITHUB_BASE", defaultGitHubBase),
+		CodeloadBase: envOr("GITHUB_CODELOAD_BASE", defaultCodeloadBase),
+		HTTP:         &http.Client{Timeout: 2 * time.Minute},
 	}
 }
 
 // ResolveCommit geeft de commit-SHA voor een ref (branch, tag of SHA). Een lege
 // ref betekent de default branch.
 func (c *GitHubClient) ResolveCommit(ctx context.Context, repo RepoRef, ref string) (string, error) {
-	if ref == "" {
-		ref = "HEAD"
+	if looksLikeSHA(ref) {
+		return ref, nil
 	}
-	var out struct {
-		SHA string `json:"sha"`
+	u := fmt.Sprintf("%s/%s/%s.git/info/refs?service=git-upload-pack", base(c.GitHubBase, defaultGitHubBase), url.PathEscape(repo.Owner), url.PathEscape(repo.Repo))
+	body, err := c.get(ctx, u, maxRefsBytes)
+	if err != nil {
+		return "", fmt.Errorf("commit %s@%s: %w", repo, refOrHead(ref), err)
 	}
-	u := fmt.Sprintf("%s/repos/%s/%s/commits/%s", c.apiBase(), repo.Owner, repo.Repo, url.PathEscape(ref))
-	if err := c.getJSON(ctx, u, &out); err != nil {
-		return "", fmt.Errorf("commit %s@%s: %w", repo, ref, err)
+	refs, err := parseRefs(body)
+	if err != nil {
+		return "", fmt.Errorf("commit %s@%s: %w", repo, refOrHead(ref), err)
 	}
-	if out.SHA == "" {
-		return "", fmt.Errorf("commit %s@%s: lege sha", repo, ref)
+	candidates := []string{"HEAD"}
+	if ref != "" {
+		candidates = []string{"refs/heads/" + ref, "refs/tags/" + ref + "^{}", "refs/tags/" + ref, ref}
 	}
-	return out.SHA, nil
-}
-
-// ListFiles geeft alle bestandspaden (blobs) in de repository op een commit.
-func (c *GitHubClient) ListFiles(ctx context.Context, repo RepoRef, sha string) ([]string, error) {
-	var out struct {
-		Truncated bool `json:"truncated"`
-		Tree      []struct {
-			Path string `json:"path"`
-			Type string `json:"type"`
-		} `json:"tree"`
-	}
-	u := fmt.Sprintf("%s/repos/%s/%s/git/trees/%s?recursive=1", c.apiBase(), repo.Owner, repo.Repo, url.PathEscape(sha))
-	if err := c.getJSON(ctx, u, &out); err != nil {
-		return nil, fmt.Errorf("tree %s@%s: %w", repo, sha, err)
-	}
-	if out.Truncated {
-		return nil, fmt.Errorf("tree %s@%s is afgekapt door GitHub; repository is te groot", repo, sha)
-	}
-	paths := make([]string, 0, len(out.Tree))
-	for _, entry := range out.Tree {
-		if entry.Type == "blob" {
-			paths = append(paths, entry.Path)
+	for _, name := range candidates {
+		if sha, ok := refs[name]; ok {
+			return sha, nil
 		}
 	}
-	return paths, nil
+	if isShortSHA(ref) {
+		// codeload accepteert ook een verkorte SHA.
+		return ref, nil
+	}
+	return "", fmt.Errorf("commit %s@%s: %w", repo, refOrHead(ref), ErrNotFound)
+}
+
+// ListFiles geeft alle bestandspaden in de repository op een commit.
+func (c *GitHubClient) ListFiles(ctx context.Context, repo RepoRef, sha string) ([]string, error) {
+	a, err := c.archive(ctx, repo, sha)
+	if err != nil {
+		return nil, err
+	}
+	return append([]string(nil), a.paths...), nil
 }
 
 // ReadFile leest een bestand op een commit.
 func (c *GitHubClient) ReadFile(ctx context.Context, repo RepoRef, sha, path string) ([]byte, error) {
-	u := fmt.Sprintf("%s/%s/%s/%s/%s", strings.TrimRight(c.rawBase(), "/"), repo.Owner, repo.Repo, sha, escapePath(path))
-	body, err := c.get(ctx, u, false)
+	a, err := c.archive(ctx, repo, sha)
 	if err != nil {
-		return nil, fmt.Errorf("bestand %s@%s:%s: %w", repo, sha, path, err)
+		return nil, err
 	}
-	return body, nil
+	if a.tooLarge[path] {
+		return nil, fmt.Errorf("bestand %s@%s:%s: groter dan %d bytes", repo, sha, path, maxFileBytes)
+	}
+	content, ok := a.files[path]
+	if !ok {
+		return nil, fmt.Errorf("bestand %s@%s:%s: %w", repo, sha, path, ErrNotFound)
+	}
+	return content, nil
 }
 
-func (c *GitHubClient) getJSON(ctx context.Context, u string, out any) error {
-	body, err := c.get(ctx, u, true)
-	if err != nil {
-		return err
+// archive haalt het archief van een commit op, of geeft het uit de cache.
+func (c *GitHubClient) archive(ctx context.Context, repo RepoRef, sha string) (*repoArchive, error) {
+	key := repo.String() + "@" + sha
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if a, ok := c.archives[key]; ok {
+		return a, nil
 	}
-	return json.Unmarshal(body, out)
+	u := fmt.Sprintf("%s/%s/%s/tar.gz/%s", base(c.CodeloadBase, defaultCodeloadBase), url.PathEscape(repo.Owner), url.PathEscape(repo.Repo), url.PathEscape(sha))
+	body, err := c.get(ctx, u, maxArchiveBytes)
+	if err != nil {
+		return nil, fmt.Errorf("archief %s@%s: %w", repo, sha, err)
+	}
+	a, err := readArchive(body)
+	if err != nil {
+		return nil, fmt.Errorf("archief %s@%s: %w", repo, sha, err)
+	}
+	if c.archives == nil {
+		c.archives = map[string]*repoArchive{}
+	}
+	if len(c.order) >= archiveCacheSize {
+		delete(c.archives, c.order[0])
+		c.order = c.order[1:]
+	}
+	c.archives[key] = a
+	c.order = append(c.order, key)
+	return a, nil
 }
 
-func (c *GitHubClient) get(ctx context.Context, u string, api bool) (body []byte, err error) {
+// readArchive leest een tar.gz van codeload. Alle paden beginnen met één map
+// (<repo>-<sha>/), die wordt weggelaten.
+func readArchive(body []byte) (*repoArchive, error) {
+	gz, err := gzip.NewReader(bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	a := &repoArchive{files: map[string][]byte{}, tooLarge: map[string]bool{}}
+	kept := 0
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		if hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+		_, p, ok := strings.Cut(hdr.Name, "/")
+		if !ok || p == "" {
+			continue
+		}
+		a.paths = append(a.paths, p)
+		if hdr.Size > maxFileBytes {
+			a.tooLarge[p] = true
+			continue
+		}
+		if kept += int(hdr.Size); kept > maxKeptBytes {
+			return nil, fmt.Errorf("repository is groter dan %d bytes", maxKeptBytes)
+		}
+		content, err := io.ReadAll(io.LimitReader(tr, maxFileBytes))
+		if err != nil {
+			return nil, err
+		}
+		a.files[p] = content
+	}
+	return a, nil
+}
+
+// parseRefs leest de advertentie van git-upload-pack (pkt-lines) naar een
+// map van ref naar SHA. De eerste ref bevat na een NUL de capabilities.
+func parseRefs(body []byte) (map[string]string, error) {
+	refs := map[string]string{}
+	r := bufio.NewReader(bytes.NewReader(body))
+	for {
+		var size [4]byte
+		if _, err := io.ReadFull(r, size[:]); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, fmt.Errorf("ongeldig antwoord van git: %w", err)
+		}
+		n, err := strconv.ParseUint(string(size[:]), 16, 16)
+		if err != nil {
+			return nil, fmt.Errorf("ongeldig antwoord van git: %w", err)
+		}
+		if n == 0 {
+			continue // flush-pkt
+		}
+		if n < 4 {
+			return nil, errors.New("ongeldig antwoord van git")
+		}
+		line := make([]byte, n-4)
+		if _, err := io.ReadFull(r, line); err != nil {
+			return nil, fmt.Errorf("ongeldig antwoord van git: %w", err)
+		}
+		text := strings.TrimSuffix(string(line), "\n")
+		if strings.HasPrefix(text, "#") {
+			continue
+		}
+		text, _, _ = strings.Cut(text, "\x00")
+		sha, name, ok := strings.Cut(text, " ")
+		if ok && looksLikeSHA(sha) {
+			refs[name] = sha
+		}
+	}
+	if len(refs) == 0 {
+		return nil, errors.New("geen refs gevonden")
+	}
+	return refs, nil
+}
+
+func (c *GitHubClient) get(ctx context.Context, u string, limit int64) (body []byte, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, http.NoBody)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", "don-skills-register")
-	if api {
-		req.Header.Set("Accept", "application/vnd.github+json")
-		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-		if c.Token != "" {
-			req.Header.Set("Authorization", "Bearer "+c.Token)
-		}
-	}
 	client := c.HTTP
 	if client == nil {
 		client = http.DefaultClient
@@ -165,42 +290,47 @@ func (c *GitHubClient) get(ctx context.Context, u string, api bool) (body []byte
 		}
 	}()
 	switch {
-	case resp.StatusCode == http.StatusNotFound:
+	// GitHub geeft 401 voor een repository die niet bestaat of privé is.
+	case resp.StatusCode == http.StatusNotFound, resp.StatusCode == http.StatusUnauthorized:
 		return nil, ErrNotFound
 	case resp.StatusCode >= http.StatusMultipleChoices:
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(snippet)))
 	}
-	body, err = io.ReadAll(io.LimitReader(resp.Body, maxFileBytes+1))
+	body, err = io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		return nil, err
 	}
-	if len(body) > maxFileBytes {
-		return nil, fmt.Errorf("bestand groter dan %d bytes", maxFileBytes)
+	if int64(len(body)) > limit {
+		return nil, fmt.Errorf("antwoord groter dan %d bytes", limit)
 	}
 	return body, nil
 }
 
-func (c *GitHubClient) apiBase() string {
-	if c.APIBase == "" {
-		return defaultGitHubAPIBase
+func refOrHead(ref string) string {
+	if ref == "" {
+		return "HEAD"
 	}
-	return strings.TrimRight(c.APIBase, "/")
+	return ref
 }
 
-func (c *GitHubClient) rawBase() string {
-	if c.RawBase == "" {
-		return defaultGitHubRawBase
+func isShortSHA(ref string) bool {
+	if len(ref) < 7 || len(ref) >= 40 {
+		return false
 	}
-	return c.RawBase
+	for _, r := range ref {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
-func escapePath(path string) string {
-	parts := strings.Split(path, "/")
-	for i, p := range parts {
-		parts[i] = url.PathEscape(p)
+func base(v, fallback string) string {
+	if v == "" {
+		return fallback
 	}
-	return strings.Join(parts, "/")
+	return strings.TrimRight(v, "/")
 }
 
 func envOr(key, fallback string) string {
